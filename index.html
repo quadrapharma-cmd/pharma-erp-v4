@@ -323,7 +323,7 @@ strong{font-weight:700;color:var(--text)}
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
     طباعة
   </button>
-  <button class="btn btn-ghost" onclick="exportExcel()" style="gap:6px;color:var(--green-light);border-color:rgba(46,160,67,.4)">
+  <button class="btn btn-ghost" onclick="exportFinancialExcel()" style="gap:6px;color:var(--green-light);border-color:rgba(46,160,67,.4)">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
     تصدير Excel
   </button>
@@ -335,7 +335,7 @@ strong{font-weight:700;color:var(--text)}
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
     طباعة
   </button>
-  <button class="btn btn-ghost" onclick="exportExcel()" style="gap:6px;color:var(--green-light);border-color:rgba(46,160,67,.4)">
+  <button class="btn btn-ghost" onclick="exportFinancialExcel()" style="gap:6px;color:var(--green-light);border-color:rgba(46,160,67,.4)">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
     تصدير Excel
   </button>
@@ -4611,6 +4611,922 @@ function rejectBatch(orderId){
   });
   alert('❌ تم رفض الدفعة وتسجيل السبب');
   showBPR(orderId);
+}
+
+// ════════════════════════════════════════════════════════════════
+// FINANCIAL REPORTS MODULE — التقارير المالية الشاملة
+// كل الأرقام بتيجي تلقائياً من بيانات ERP
+// ════════════════════════════════════════════════════════════════
+
+PAGES.reports = function(){
+  setPage('التقارير المالية الشاملة',
+    'كل الأرقام محسوبة تلقائياً من بيانات الشركة',
+    `<div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-green" onclick="exportFinancialExcel()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        تصدير Excel كامل
+      </button>
+      <button class="btn btn-white" onclick="window.print()">🖨️ طباعة</button>
+    </div>`,
+    buildFinancialReports()
+  );
+  initTabs();
+};
+
+// ── حساب كل الأرقام من DB ─────────────────────────────────────
+function calcFinancials(){
+  const dels    = getAll('deliveryOrders');
+  const items   = getAll('deliveryItems');
+  const exps    = getAll('expenses');
+  const pos     = getAll('productionOrders');
+  const inv     = getAll('inventory');
+  const mats    = getAll('materials');
+  const rcpts   = getAll('materialReceipts');
+  const emps    = getAll('employees').filter(e=>e.status==='active');
+  const budgets = getAll('budgetLines');
+  const assets  = getAll('assets');
+  const batchM  = getAll('batchMaterials');
+  const taxL    = getAll('taxLines');
+  const recvbl  = getAll('receivables');
+  const purOrds = getAll('purchaseOrders');
+  const payroll = getAll('payrollRuns');
+
+  // ── الإيرادات ──────────────────────────────────────────────
+  const deliveredOrders = dels.filter(d=>d.status==='delivered');
+  const totalRevenue    = deliveredOrders.reduce((s,d)=>s+Number(d.totalAmount||0),0);
+  const pendingRevenue  = dels.filter(d=>d.status==='pending').reduce((s,d)=>s+Number(d.totalAmount||0),0);
+  const returnedVal     = getAll('returns').reduce((s,r)=>s+Number(r.totalValue||0),0);
+  const netRevenue      = totalRevenue - returnedVal;
+
+  // ── تكلفة المبيعات (COGS) ──────────────────────────────────
+  // تكلفة المواد من التشغيلات الفعلية
+  const prodMatCost = batchM.reduce((s,m)=>s+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0);
+  // تكلفة CMO
+  const cmoCost = pos.reduce((s,p)=>s+Number(p.cmoBaseCost||p.totalCost||0),0);
+  const cogs = prodMatCost + cmoCost;
+  const grossProfit = netRevenue - cogs;
+  const grossMargin = netRevenue > 0 ? grossProfit/netRevenue : 0;
+
+  // ── المصروفات ─────────────────────────────────────────────
+  const directExp   = exps.filter(e=>e.expenseType==='direct').reduce((s,e)=>s+Number(e.amount||0),0);
+  const indirectExp = exps.filter(e=>e.expenseType==='indirect').reduce((s,e)=>s+Number(e.amount||0),0);
+  // مصروفات تصنيف
+  const expByCat = {};
+  exps.forEach(e=>{
+    expByCat[e.category] = (expByCat[e.category]||0) + Number(e.amount||0);
+  });
+  const totalExp = directExp + indirectExp;
+
+  // الرواتب
+  const monthSalary = emps.reduce((s,e)=>s+Number(e.salary||0)+Number(e.allowances||0)-Number(e.deductions||0),0);
+  const lastPayroll = payroll.slice(-1)[0];
+
+  // ── صافي الربح ────────────────────────────────────────────
+  const totalCosts  = cogs + totalExp;
+  const netProfit   = netRevenue - totalCosts;
+  const netMargin   = netRevenue > 0 ? netProfit/netRevenue : 0;
+  const ebitda      = netProfit; // مبسط
+
+  // ── قائمة المركز المالي ───────────────────────────────────
+  // الأصول المتداولة
+  const invValue    = inv.reduce((s,i)=>s+Number(i.quantity||0)*Number(i.unitCost||0),0);
+  const cashEquiv   = 0; // من النقدية
+  const receivables = recvbl.filter(r=>r.status!=='محصّل').reduce((s,r)=>s+Number(r.amount||0),0);
+  const currentAssets = invValue + receivables + pendingRevenue;
+
+  // الأصول غير المتداولة
+  const fixedAssets = assets.reduce((s,a)=>s+Number(a.purchaseCost||0)-Number(a.accDepreciation||0),0);
+  const totalAssets = currentAssets + fixedAssets;
+
+  // الالتزامات
+  const supplierDebt = purOrds.filter(p=>p.status==='معلق').reduce((s,p)=>s+Number(p.totalAmount||0),0);
+  const taxLiab     = taxL.filter(t=>t.status==='معلق').reduce((s,t)=>s+Number(t.amount||0),0);
+  const totalLiab   = supplierDebt + taxLiab;
+  const equity      = totalAssets - totalLiab;
+
+  // ── VAT ──────────────────────────────────────────────────
+  const vatOut = deliveredOrders.reduce((s,d)=>s+Number(d.vatAmount||0),0);
+  const vatIn  = purOrds.filter(p=>p.status==='مستلم').reduce((s,p)=>s+Number(p.vatAmount||0),0);
+  const netVat = vatOut - vatIn;
+
+  // ── المخزون ───────────────────────────────────────────────
+  const rawMatValue = mats.reduce((s,m)=>s+Number(m.currentStock||0)*Number(m.unitCost||0),0);
+  const finishedVal = invValue;
+  const totalInvVal = rawMatValue + finishedVal;
+
+  // ── الإنتاج ───────────────────────────────────────────────
+  const totalProduced  = pos.reduce((s,p)=>s+Number(p.quantity||0),0);
+  const releasedBatches= pos.filter(p=>p.bprStatus==='released').length;
+  const pendingBatches = pos.filter(p=>p.bprStatus!=='released'&&p.bprStatus!=='rejected').length;
+  const avgUnitCost    = totalProduced > 0 ?
+    pos.reduce((s,p)=>s+Number(p.unitCost||0),0)/pos.filter(p=>Number(p.unitCost||0)>0).length : 0;
+
+  // ── المبيعات ─────────────────────────────────────────────
+  const distCount   = getAll('distributors').filter(d=>d.status==='active').length;
+  const topDist     = (() => {
+    const m = new Map();
+    deliveredOrders.forEach(o=>{
+      const d=getById('distributors',o.distributorId);
+      if(d) m.set(d.name,(m.get(d.name)||0)+Number(o.totalAmount||0));
+    });
+    return [...m.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5);
+  })();
+
+  // ── الموازنة ─────────────────────────────────────────────
+  const totalBudget  = budgets.reduce((s,b)=>s+Number(b.budgetedAmount||0),0);
+  const budgetVarMap = {};
+  budgets.forEach(b=>{
+    const actual = expByCat[b.category]||0;
+    budgetVarMap[b.category] = {
+      budgeted: Number(b.budgetedAmount||0),
+      actual,
+      variance: Number(b.budgetedAmount||0) - actual,
+      pct: Number(b.budgetedAmount||0)>0 ? actual/Number(b.budgetedAmount||0) : 0
+    };
+  });
+
+  return {
+    // إيرادات
+    totalRevenue, pendingRevenue, returnedVal, netRevenue,
+    // تكلفة
+    prodMatCost, cmoCost, cogs, grossProfit, grossMargin,
+    // مصروفات
+    directExp, indirectExp, totalExp, expByCat,
+    monthSalary, lastPayroll,
+    // ربح
+    totalCosts, netProfit, netMargin, ebitda,
+    // ميزانية
+    invValue, rawMatValue, finishedVal, totalInvVal,
+    receivables, currentAssets, fixedAssets, totalAssets,
+    supplierDebt, taxLiab, totalLiab, equity,
+    // VAT
+    vatOut, vatIn, netVat,
+    // إنتاج
+    totalProduced, releasedBatches, pendingBatches, avgUnitCost,
+    // مبيعات
+    distCount, topDist,
+    // موازنة
+    totalBudget, budgetVarMap,
+    // موظفون
+    empCount: emps.length, monthSalary,
+    // ضرائب
+    taxLiab, taxL,
+  };
+}
+
+// ── بناء صفحة التقارير ────────────────────────────────────────
+function buildFinancialReports(){
+  const F = calcFinancials();
+  const prod = getAll('products').length;
+  const orders = getAll('productionOrders').length;
+
+  return `
+  <!-- TABS -->
+  <div class="tabs" style="flex-wrap:wrap">
+    <button class="tab active" data-group="rpt" data-tab="rpt-pl">📄 قائمة الدخل</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-bs">🏦 المركز المالي</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-cogs">🏭 تكلفة الإنتاج</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-exp">🧾 تحليل المصروفات</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-bud">💰 الميزانية مقابل الفعلي</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-inv">📦 قيمة المخزون</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-sales">🚚 تحليل المبيعات</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-tax">🧾 الضرائب وVAT</button>
+  </div>
+
+  <!-- ══ قائمة الدخل ══ -->
+  <div id="rpt-pl" class="tab-pane" data-group="rpt">
+    ${reportPL(F)}
+  </div>
+
+  <!-- ══ المركز المالي ══ -->
+  <div id="rpt-bs" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportBS(F)}
+  </div>
+
+  <!-- ══ تكلفة الإنتاج ══ -->
+  <div id="rpt-cogs" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportCOGS(F)}
+  </div>
+
+  <!-- ══ تحليل المصروفات ══ -->
+  <div id="rpt-exp" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportExpenses(F)}
+  </div>
+
+  <!-- ══ الميزانية ══ -->
+  <div id="rpt-bud" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportBudget(F)}
+  </div>
+
+  <!-- ══ المخزون ══ -->
+  <div id="rpt-inv" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportInventory(F)}
+  </div>
+
+  <!-- ══ المبيعات ══ -->
+  <div id="rpt-sales" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportSales(F)}
+  </div>
+
+  <!-- ══ الضرائب ══ -->
+  <div id="rpt-tax" class="tab-pane" data-group="rpt" style="display:none">
+    ${reportTax(F)}
+  </div>
+  `;
+}
+
+// ── مساعد عرض السطر ──────────────────────────────────────────
+function plRow(label, value, cls='', indent=0, bold=false, borderTop=false){
+  const pad = indent ? `padding-right:${indent*16}px` : '';
+  const bt  = borderTop ? 'border-top:2px solid var(--border);margin-top:4px;padding-top:8px' : '';
+  const color = typeof value==='number' && value<0 ? 'color:var(--red)' : '';
+  return `<div style="display:flex;justify-content:space-between;padding:7px 0;${bt};${pad}">
+    <span style="color:var(--${bold?'text':'muted'});font-weight:${bold?700:400};font-size:${bold?'14px':'13px'}">${label}</span>
+    <span class="${cls}" style="${color};font-weight:${bold?700:400};font-size:${bold?'15px':'13px'};min-width:150px;text-align:left">
+      ${typeof value==='number' ? fmt(Math.abs(value))+(value<0?' ج.م (خسارة)':' ج.م') : value}
+    </span>
+  </div>`;
+}
+
+function kpiCard(label, value, sub='', color='text-blue', icon=''){
+  return `<div class="stat-card">
+    <div class="lbl">${icon} ${label}</div>
+    <div class="val ${color}" style="font-size:20px">${typeof value==='number'?fmt(value)+' ج.م':value}</div>
+    ${sub?`<div class="sub">${sub}</div>`:''}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// INCOME STATEMENT — قائمة الدخل
+// ════════════════════════════════════════════════════════════════
+function reportPL(F){
+  const prods = getAll('products').length;
+  const dists  = getAll('distributors').filter(d=>d.status==='active').length;
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('صافي الإيرادات',F.netRevenue,'بعد خصم المرتجعات','text-green','💰')}
+    ${kpiCard('مجمل الربح',F.grossProfit,'قبل المصروفات التشغيلية',F.grossProfit>=0?'text-green':'text-red','📊')}
+    ${kpiCard('صافي الربح / الخسارة',F.netProfit,'',F.netProfit>=0?'text-green':'text-red','📈')}
+    <div class="stat-card">
+      <div class="lbl">🎯 هامش الربح الصافي</div>
+      <div class="val ${F.netMargin>=0?'text-green':'text-red'}" style="font-size:20px">${(F.netMargin*100).toFixed(1)}%</div>
+      <div class="sub">هامش مجمل: ${(F.grossMargin*100).toFixed(1)}%</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="font-size:16px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+        📄 قائمة الدخل — Income Statement
+      </h2>
+
+      ${plRow('إيرادات المبيعات', F.totalRevenue, '', 0, false)}
+      ${plRow('(مردودات ومرتجعات)', -F.returnedVal, '', 1)}
+      ${plRow('صافي إيرادات النشاط', F.netRevenue, 'text-green fw7', 0, true, true)}
+
+      <div style="height:8px"></div>
+      ${plRow('تكلفة المواد الخام المستخدمة', -F.prodMatCost, '', 1)}
+      ${plRow('تكلفة التصنيع (CMO)', -F.cmoCost, '', 1)}
+      ${plRow('إجمالي تكلفة المبيعات', -F.cogs, 'text-red', 0, true)}
+      ${plRow('مجمل الربح', F.grossProfit, F.grossProfit>=0?'text-green fw7':'text-red fw7', 0, true, true)}
+
+      <div style="height:8px"></div>
+      ${plRow('مصروفات مباشرة', -F.directExp, '', 1)}
+      ${plRow('مصروفات غير مباشرة', -F.indirectExp, '', 1)}
+      ${plRow('إجمالي المصروفات التشغيلية', -F.totalExp, 'text-red', 0, true)}
+
+      <div style="height:12px;border-top:2px solid ${F.netProfit>=0?'var(--green)':'var(--red)'};margin-top:8px"></div>
+      ${plRow(F.netProfit>=0?'✅ صافي الربح':'❌ صافي الخسارة', F.netProfit,
+        F.netProfit>=0?'text-green fw7':'text-red fw7', 0, true)}
+      ${plRow('هامش الربح الصافي', (F.netMargin*100).toFixed(2)+'%', '', 0)}
+      ${plRow('هامش مجمل الربح', (F.grossMargin*100).toFixed(2)+'%', '', 0)}
+    </div>
+
+    <div>
+      <div class="card" style="padding:24px;margin-bottom:16px">
+        <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">📊 توزيع التكاليف</h2>
+        ${[
+          ['تكلفة المواد',F.prodMatCost,F.totalCosts],
+          ['تكلفة CMO',F.cmoCost,F.totalCosts],
+          ['مصروفات مباشرة',F.directExp,F.totalCosts],
+          ['مصروفات غير مباشرة',F.indirectExp,F.totalCosts],
+        ].map(([label,val,total])=>{
+          const pct = total>0?val/total:0;
+          const w = Math.min(pct*100,100);
+          const color = label.includes('مواد')?'var(--blue)':label.includes('CMO')?'var(--amber)':label.includes('مباشرة')&&!label.includes('غير')?'var(--green)':'var(--purple)';
+          return `<div style="margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px;font-size:12px">
+              <span>${label}</span>
+              <span class="fw7">${fmt(val)} ج.م (${(pct*100).toFixed(1)}%)</span>
+            </div>
+            <div style="height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden">
+              <div style="height:100%;width:${w}%;background:${color};border-radius:4px"></div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+
+      <div class="card" style="padding:20px">
+        <h2 style="font-size:15px;font-weight:700;margin-bottom:12px">🔑 مؤشرات سريعة</h2>
+        ${[
+          ['إجمالي الإيرادات',F.totalRevenue,'text-green'],
+          ['إجمالي التكاليف',F.totalCosts,'text-red'],
+          ['إجمالي المصروفات',F.totalExp,'text-amber'],
+          ['الرواتب الشهرية',F.monthSalary,'text-purple'],
+          ['قيمة المخزون',F.totalInvVal,'text-blue'],
+        ].map(([l,v,c])=>`
+          <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+            <span style="color:var(--muted)">${l}</span>
+            <span class="${c} fw7">${fmt(v)} ج.م</span>
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// BALANCE SHEET — المركز المالي
+// ════════════════════════════════════════════════════════════════
+function reportBS(F){
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('إجمالي الأصول',F.totalAssets,'','text-blue','🏦')}
+    ${kpiCard('إجمالي الالتزامات',F.totalLiab,'','text-red','⚠️')}
+    ${kpiCard('صافي حقوق الملكية',F.equity,'',F.equity>=0?'text-green':'text-red','💼')}
+    <div class="stat-card">
+      <div class="lbl">📊 نسبة الديون للأصول</div>
+      <div class="val ${F.totalAssets>0&&F.totalLiab/F.totalAssets<0.5?'text-green':'text-red'}" style="font-size:20px">
+        ${F.totalAssets>0?(F.totalLiab/F.totalAssets*100).toFixed(1)+'%':'—'}
+      </div>
+      <div class="sub">${F.totalAssets>0&&F.totalLiab/F.totalAssets<0.5?'✅ آمن':'⚠️ مرتفع'}</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <!-- الأصول -->
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--blue);font-size:16px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid rgba(56,139,253,.3)">
+        📈 الأصول — Assets
+      </h2>
+      <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase">أصول متداولة</div>
+      ${plRow('قيمة المخزون (منتجات نهائية)', F.finishedVal,'',1)}
+      ${plRow('قيمة المواد الخام والتغليف', F.rawMatValue,'',1)}
+      ${plRow('ذمم مدينة (مبيعات معلقة)', F.receivables,'',1)}
+      ${plRow('إجمالي الأصول المتداولة', F.currentAssets,'text-blue fw7',0,true,true)}
+      <div style="height:8px"></div>
+      <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase">أصول غير متداولة</div>
+      ${plRow('صافي الأصول الثابتة', F.fixedAssets,'',1)}
+      ${plRow('إجمالي الأصول غير المتداولة', F.fixedAssets,'text-blue fw7',0,true,true)}
+      <div style="height:12px;border-top:2px solid var(--blue);margin-top:8px"></div>
+      ${plRow('إجمالي الأصول', F.totalAssets,'text-blue fw7',0,true)}
+    </div>
+
+    <!-- الالتزامات وحقوق الملكية -->
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--red);font-size:16px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:2px solid rgba(248,81,73,.3)">
+        📉 الالتزامات وحقوق الملكية
+      </h2>
+      <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase">التزامات متداولة</div>
+      ${plRow('ذمم دائنة (موردون معلقون)', F.supplierDebt,'',1)}
+      ${plRow('التزامات ضريبية معلقة', F.taxLiab,'',1)}
+      ${plRow('إجمالي الالتزامات المتداولة', F.totalLiab,'text-red fw7',0,true,true)}
+      <div style="height:8px"></div>
+      <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px;text-transform:uppercase">حقوق الملكية</div>
+      ${plRow('إجمالي الإيرادات المتراكمة', getAll('deliveryOrders').filter(d=>d.status==='delivered').reduce((s,d)=>s+Number(d.totalAmount||0),0),'',1)}
+      ${plRow('إجمالي التكاليف المتراكمة', -(getAll('expenses').reduce((s,e)=>s+Number(e.amount||0),0)),'',1)}
+      ${plRow('صافي حقوق الملكية', F.equity, F.equity>=0?'text-green fw7':'text-red fw7',0,true,true)}
+      <div style="height:12px;border-top:2px solid var(--red);margin-top:8px"></div>
+      ${plRow('إجمالي الالتزامات وحقوق الملكية', F.totalLiab+F.equity,'text-red fw7',0,true)}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// COGS ANALYSIS — تكلفة الإنتاج
+// ════════════════════════════════════════════════════════════════
+function reportCOGS(F){
+  const pos = getAll('productionOrders');
+  const batchM = getAll('batchMaterials');
+  const prods = getAll('products');
+
+  // تكلفة كل منتج
+  const prodCosts = prods.map(p=>{
+    const pOrders = pos.filter(o=>o.productId===p.id);
+    const matCost = pOrders.reduce((s,o)=>{
+      return s + batchM.filter(m=>m.productionOrderId===o.id)
+        .reduce((x,m)=>x+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0);
+    },0);
+    const cmoCost = pOrders.reduce((s,o)=>s+Number(o.cmoBaseCost||0),0);
+    const totalQty = pOrders.reduce((s,o)=>s+Number(o.quantity||0),0);
+    const totalCost = matCost + cmoCost;
+    const unitCost = totalQty > 0 ? totalCost/totalQty : 0;
+    const sellPrice = Number(p.sellingPrice||0);
+    const margin = sellPrice > 0 ? (sellPrice-unitCost)/sellPrice : 0;
+    return {name:p.name, matCost, cmoCost, totalCost, totalQty, unitCost, sellPrice, margin, batches:pOrders.length};
+  }).filter(p=>p.totalCost>0||p.batches>0);
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('تكلفة المواد الخام',F.prodMatCost,'من الفواتير الفعلية','text-blue','🧪')}
+    ${kpiCard('تكلفة CMO',F.cmoCost,'رسوم التصنيع','text-amber','🏭')}
+    ${kpiCard('إجمالي تكلفة الإنتاج',F.cogs,'','text-red','💰')}
+    ${kpiCard('وحدات مُنتَجة',getAll('productionOrders').reduce((s,o)=>s+Number(o.quantity||0),0)+' وحدة','','text-green','📦')}
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📊 تكلفة كل منتج من البيانات الفعلية</h2></div>
+    ${tbl(['المنتج','عدد التشغيلات','الكمية المنتجة','تكلفة المواد','تكلفة CMO',
+           'إجمالي التكلفة','تكلفة الوحدة','سعر البيع','هامش الربح %'],
+      prodCosts.length ? prodCosts.map(p=>tr(
+        `<strong>${p.name}</strong>`,
+        p.batches,
+        fmtN(p.totalQty)+' وحدة',
+        p.matCost?`<span class="text-blue fw7">${fmt(p.matCost)} ج.م</span>`:'—',
+        p.cmoCost?`<span class="text-amber fw7">${fmt(p.cmoCost)} ج.م</span>`:'—',
+        `<span class="text-red fw7">${fmt(p.totalCost)} ج.م</span>`,
+        p.unitCost?`<span class="fw7">${fmt(p.unitCost)} ج.م</span>`:'—',
+        p.sellPrice?`<span class="text-green fw7">${fmt(p.sellPrice)} ج.م</span>`:'—',
+        p.sellPrice&&p.unitCost?`<span class="${p.margin>=0.2?'text-green':p.margin>=0.05?'text-amber':'text-red'} fw7">${(p.margin*100).toFixed(1)}%</span>`:'—'
+      )) : [tr('<span class="text-muted">أضف أوامر إنتاج ومواد لتظهر التكاليف هنا</span>')]
+    )}
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="card-head"><h2>🧪 تفاصيل المواد المستخدمة في الإنتاج (من الفواتير)</h2></div>
+    ${(()=>{
+      const mats = getAll('materials');
+      const batchM2 = getAll('batchMaterials');
+      const matSummary = {};
+      batchM2.forEach(b=>{
+        const mat = getById('materials',b.materialId);
+        if(!mat) return;
+        if(!matSummary[mat.name]) matSummary[mat.name]={name:mat.name,type:mat.materialType,totalQty:0,totalCost:0,receipts:new Set()};
+        matSummary[mat.name].totalQty += Number(b.quantity||0);
+        matSummary[mat.name].totalCost += Number(b.quantity||0)*Number(b.unitCostAtTime||0);
+        if(b.invoiceNumber) matSummary[mat.name].receipts.add(b.invoiceNumber);
+      });
+      const rows = Object.values(matSummary);
+      if(!rows.length) return '<div class="empty">لا توجد مواد مرتبطة بتشغيلات بعد</div>';
+      return tbl(['المادة','النوع','الكمية المستخدمة','التكلفة الإجمالية','متوسط سعر الوحدة','عدد الفواتير المستخدمة'],
+        rows.sort((a,b)=>b.totalCost-a.totalCost).map(m=>tr(
+          `<strong>${m.name}</strong>`,
+          badge(m.type),
+          fmtN(m.totalQty),
+          `<span class="text-red fw7">${fmt(m.totalCost)} ج.م</span>`,
+          m.totalQty?fmt(m.totalCost/m.totalQty)+' ج.م':'—',
+          m.receipts.size
+        ))
+      );
+    })()}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// EXPENSES ANALYSIS — تحليل المصروفات
+// ════════════════════════════════════════════════════════════════
+function reportExpenses(F){
+  const exps = getAll('expenses');
+  const byDept = {};
+  const byMonth = {};
+  exps.forEach(e=>{
+    const dept = e.department||'غير محدد';
+    byDept[dept] = (byDept[dept]||0) + Number(e.amount||0);
+    const m = e.expenseDate?e.expenseDate.slice(0,7):'غير محدد';
+    byMonth[m] = (byMonth[m]||0) + Number(e.amount||0);
+  });
+
+  return `
+  <div class="stats-grid g3" style="margin-bottom:20px">
+    ${kpiCard('إجمالي المصروفات',F.totalExp,'','text-red','🧾')}
+    ${kpiCard('مصروفات مباشرة',F.directExp,`${exps.filter(e=>e.expenseType==='direct').length} بند`,'text-blue','📋')}
+    ${kpiCard('مصروفات غير مباشرة',F.indirectExp,`${exps.filter(e=>e.expenseType==='indirect').length} بند`,'text-purple','📋')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">📊 المصروفات حسب الفئة</h2>
+      ${Object.entries(F.expByCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>{
+        const pct = F.totalExp>0?amt/F.totalExp:0;
+        return `<div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span>${cat}</span><span class="fw7">${fmt(amt)} ج.م (${(pct*100).toFixed(1)}%)</span>
+          </div>
+          <div style="height:6px;background:rgba(255,255,255,.08);border-radius:3px">
+            <div style="height:100%;width:${Math.min(pct*100,100)}%;background:var(--blue);border-radius:3px"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">🏢 المصروفات حسب القسم</h2>
+      ${Object.entries(byDept).sort((a,b)=>b[1]-a[1]).map(([dept,amt])=>{
+        const pct = F.totalExp>0?amt/F.totalExp:0;
+        return `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px">
+          <span>${dept}</span>
+          <div style="text-align:left">
+            <span class="text-red fw7">${fmt(amt)} ج.م</span>
+            <span style="color:var(--muted);font-size:11px;margin-right:6px">${(pct*100).toFixed(1)}%</span>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📅 المصروفات الشهرية</h2></div>
+    ${tbl(['الشهر','إجمالي المصروفات','مصروفات مباشرة','مصروفات غير مباشرة'],
+      Object.entries(byMonth).sort().map(([month,total])=>{
+        const d = exps.filter(e=>e.expenseDate?.startsWith(month)&&e.expenseType==='direct').reduce((s,e)=>s+Number(e.amount||0),0);
+        const i = exps.filter(e=>e.expenseDate?.startsWith(month)&&e.expenseType==='indirect').reduce((s,e)=>s+Number(e.amount||0),0);
+        return tr(month, `<span class="text-red fw7">${fmt(total)} ج.م</span>`,
+          d?`<span class="text-blue">${fmt(d)} ج.م</span>`:'—',
+          i?`<span class="text-purple">${fmt(i)} ج.م</span>`:'—');
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// BUDGET vs ACTUAL
+// ════════════════════════════════════════════════════════════════
+function reportBudget(F){
+  const budgets = getAll('budgetLines');
+  const totalBudget = budgets.reduce((s,b)=>s+Number(b.budgetedAmount||0),0);
+  const totalActual = getAll('expenses').reduce((s,e)=>s+Number(e.amount||0),0);
+  const variance = totalBudget - totalActual;
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('إجمالي الميزانية',totalBudget,'المخطط','text-blue','📋')}
+    ${kpiCard('الإنفاق الفعلي',totalActual,'من سجلات المصروفات','text-red','💸')}
+    ${kpiCard('الفرق',variance,variance>=0?'✅ في الحدود':'⚠️ تجاوز',variance>=0?'text-green':'text-red','📊')}
+    <div class="stat-card">
+      <div class="lbl">📈 نسبة الاستهلاك</div>
+      <div class="val ${totalBudget>0&&totalActual/totalBudget<1?'text-green':'text-red'}" style="font-size:20px">
+        ${totalBudget>0?(totalActual/totalBudget*100).toFixed(1)+'%':'—'}
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📊 مقارنة الميزانية بالفعلي — بند بند</h2></div>
+    ${tbl(['الفئة','القسم','السنة','المخطط (ج.م)','الفعلي (ج.م)','الفرق (ج.م)','نسبة الاستهلاك','الحالة'],
+      budgets.map(b=>{
+        const actual = getAll('expenses').filter(e=>e.category===b.category).reduce((s,e)=>s+Number(e.amount||0),0);
+        const budget = Number(b.budgetedAmount||0);
+        const diff   = budget - actual;
+        const pct    = budget>0?actual/budget:0;
+        const over   = pct > 1;
+        const warn   = pct > 0.8;
+        return tr(
+          `<strong>${b.category}</strong>`,
+          b.department||'عام', b.year,
+          `<span class="text-blue fw7">${fmt(budget)} ج.م</span>`,
+          `<span class="text-red fw7">${fmt(actual)} ج.م</span>`,
+          `<span class="${diff>=0?'text-green':'text-red'} fw7">${diff>=0?'':'-'}${fmt(Math.abs(diff))} ج.م</span>`,
+          `<div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:3px">
+              <div style="height:100%;width:${Math.min(pct*100,100)}%;background:${over?'var(--red)':warn?'var(--amber)':'var(--green-light)'};border-radius:3px"></div>
+            </div>
+            <span class="${over?'text-red':warn?'text-amber':'text-green'} fw7" style="font-size:12px;min-width:40px">${(pct*100).toFixed(0)}%</span>
+          </div>`,
+          over?'<span class="badge b-red">تجاوز</span>':warn?'<span class="badge b-amber">تنبيه</span>':'<span class="badge b-green">جيد</span>'
+        );
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// INVENTORY REPORT
+// ════════════════════════════════════════════════════════════════
+function reportInventory(F){
+  const inv  = getAll('inventory');
+  const mats = getAll('materials');
+  const now  = new Date();
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('قيمة المنتجات النهائية',F.finishedVal,inv.length+' صنف','text-blue','📦')}
+    ${kpiCard('قيمة المواد الخام',F.rawMatValue,mats.length+' مادة','text-purple','🧪')}
+    ${kpiCard('إجمالي قيمة المخزون',F.totalInvVal,'مواد + منتجات','text-green','💰')}
+    <div class="stat-card">
+      <div class="lbl">⚠️ منتجات تنتهي قريباً</div>
+      <div class="val text-amber" style="font-size:20px">
+        ${inv.filter(i=>i.expiryDate&&(new Date(i.expiryDate)-now)/86400000<90&&new Date(i.expiryDate)>now).length}
+      </div>
+      <div class="sub">خلال 90 يوم</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card">
+      <div class="card-head"><h2>📦 المنتجات النهائية</h2></div>
+      ${tbl(['المنتج','الكمية','تكلفة الوحدة','القيمة الإجمالية','الصلاحية','حالة'],
+        inv.map(i=>{
+          const p=getById('products',i.productId);
+          const days=i.expiryDate?Math.floor((new Date(i.expiryDate)-now)/86400000):null;
+          const cls=days===null?'':days<0?'text-red fw7':days<90?'text-amber fw7':'text-green';
+          return tr(
+            `<strong>${p?.name||'—'}</strong>`,
+            fmtN(i.quantity),
+            i.unitCost?fmt(i.unitCost)+' ج.م':'—',
+            `<span class="text-blue fw7">${fmt(Number(i.quantity||0)*Number(i.unitCost||0))} ج.م</span>`,
+            `<span class="${cls}">${i.expiryDate||'—'}</span>`,
+            days!==null?(days<0?'<span class="badge b-red">منتهي</span>':days<90?'<span class="badge b-amber">تنبيه</span>':'<span class="badge b-green">جيد</span>'):'—'
+          );
+        })
+      )}
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>🧪 المواد الخام والتغليف</h2></div>
+      ${tbl(['المادة','النوع','المخزون','القيمة','حد الطلب','حالة'],
+        mats.map(m=>{
+          const low=m.reorderLevel&&Number(m.currentStock||0)<=Number(m.reorderLevel);
+          return tr(
+            `<strong>${m.name}</strong>`,
+            badge(m.materialType),
+            `<span class="${low?'text-red fw7':''}">${fmtN(m.currentStock||0)} ${m.unit}</span>`,
+            m.unitCost?`<span class="text-blue fw7">${fmt(Number(m.currentStock||0)*Number(m.unitCost||0))} ج.م</span>`:'—',
+            m.reorderLevel?fmtN(m.reorderLevel)+' '+m.unit:'—',
+            low?'<span class="badge b-red">تحت الحد</span>':'<span class="badge b-green">كافي</span>'
+          );
+        })
+      )}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// SALES ANALYSIS
+// ════════════════════════════════════════════════════════════════
+function reportSales(F){
+  const dels = getAll('deliveryOrders').filter(d=>d.status==='delivered');
+  const byMonth = {};
+  dels.forEach(d=>{
+    const m=d.orderDate?d.orderDate.slice(0,7):'غير محدد';
+    byMonth[m]=(byMonth[m]||0)+Number(d.totalAmount||0);
+  });
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('إجمالي المبيعات',F.totalRevenue,'مسلّمة فعلياً','text-green','💰')}
+    ${kpiCard('مبيعات معلقة',F.pendingRevenue,'قيد التسليم','text-amber','⏳')}
+    ${kpiCard('مرتجعات',F.returnedVal,'','text-red','🔄')}
+    ${kpiCard('موزعون نشطون',F.distCount+' موزع','','text-blue','🏢')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">🏆 أكبر الموزعين مبيعاً</h2>
+      ${F.topDist.length?F.topDist.map(([name,amt],i)=>`
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span style="display:flex;align-items:center;gap:8px">
+            <span style="background:var(--green-bg);color:var(--green-light);border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700">${i+1}</span>
+            ${name}
+          </span>
+          <span class="text-green fw7">${fmt(amt)} ج.م</span>
+        </div>`).join(''):'<div class="empty">لا توجد مبيعات مسلّمة</div>'}
+    </div>
+
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">📅 المبيعات الشهرية</h2>
+      ${Object.entries(byMonth).sort().map(([m,v])=>{
+        const max=Math.max(...Object.values(byMonth));
+        const w=max>0?v/max*100:0;
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span>${m}</span><span class="text-green fw7">${fmt(v)} ج.م</span>
+          </div>
+          <div style="height:6px;background:rgba(255,255,255,.08);border-radius:3px">
+            <div style="height:100%;width:${w}%;background:var(--green);border-radius:3px"></div>
+          </div>
+        </div>`;
+      }).join('')||'<div class="empty">لا توجد بيانات</div>'}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// TAX REPORT
+// ════════════════════════════════════════════════════════════════
+function reportTax(F){
+  return `
+  <div class="stats-grid g4" style="margin-bottom:20px">
+    ${kpiCard('ضريبة المبيعات (مخرجات)',F.vatOut,'VAT على المبيعات','text-red','🧾')}
+    ${kpiCard('ضريبة المشتريات (مدخلات)',F.vatIn,'VAT على المشتريات','text-green','🧾')}
+    ${kpiCard('صافي VAT المستحق',F.netVat,F.netVat>=0?'مستحق للسداد':'رصيد دائن',F.netVat>=0?'text-red':'text-green','💰')}
+    ${kpiCard('التزامات ضريبية معلقة',F.taxLiab,'ضرائب عامة غير مسددة','text-amber','⚠️')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:16px">📋 ملخص إقرار VAT</h2>
+      ${plRow('ضريبة المبيعات (مخرجات)',F.vatOut,'text-red')}
+      ${plRow('ضريبة المشتريات (مدخلات)',-F.vatIn,'text-green')}
+      <div style="border-top:2px solid ${F.netVat>=0?'var(--red)':'var(--green)'};margin-top:8px;padding-top:8px">
+        ${plRow(F.netVat>=0?'الضريبة المستحقة للسداد':'رصيد ضريبي دائن',F.netVat,
+          F.netVat>=0?'text-red fw7':'text-green fw7',0,true)}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>🏦 الالتزامات الضريبية العامة</h2></div>
+      ${tbl(['نوع الضريبة','الوصف','المبلغ','الفترة','تاريخ الاستحقاق','الحالة'],
+        F.taxL.map(t=>tr(
+          badge(t.taxType==='income'?'direct':t.taxType==='vat'?'in_production':'pending'),
+          `<strong>${t.description}</strong>`,
+          `<span class="text-red fw7">${fmt(t.amount)} ج.م</span>`,
+          t.period||'—',t.dueDate||'—',
+          badge(t.status==='مدفوع'?'received':t.status==='معلق'?'pending':'cancelled')
+        ))
+      )}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// EXCEL EXPORT — تصدير Excel كامل من البيانات
+// ════════════════════════════════════════════════════════════════
+function exportFinancialExcel(){
+  if(typeof XLSX==='undefined'){alert('مكتبة Excel تحمّل، حاول مرة أخرى');return;}
+
+  const F = calcFinancials();
+  const wb = XLSX.utils.book_new();
+  const co = document.getElementById('logo-name')?.textContent||'الشركة';
+  const dt = new Date().toLocaleDateString('ar-EG');
+
+  // ── Sheet 1: قائمة الدخل ──────────────────────────────────
+  const plData = [
+    [co+' — قائمة الدخل'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['البيان','المبلغ (ج.م)'],
+    ['إيرادات المبيعات', F.totalRevenue],
+    ['(مردودات ومرتجعات)', -F.returnedVal],
+    ['صافي إيرادات النشاط', F.netRevenue],
+    [],
+    ['تكلفة المواد الخام', -F.prodMatCost],
+    ['تكلفة التصنيع CMO', -F.cmoCost],
+    ['إجمالي تكلفة المبيعات', -F.cogs],
+    ['مجمل الربح', F.grossProfit],
+    ['هامش مجمل الربح %', (F.grossMargin*100).toFixed(2)+'%'],
+    [],
+    ['مصروفات مباشرة', -F.directExp],
+    ['مصروفات غير مباشرة', -F.indirectExp],
+    ['إجمالي المصروفات', -F.totalExp],
+    [],
+    ['صافي الربح / الخسارة', F.netProfit],
+    ['هامش الربح الصافي %', (F.netMargin*100).toFixed(2)+'%'],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(plData), 'قائمة الدخل');
+
+  // ── Sheet 2: المركز المالي ────────────────────────────────
+  const bsData = [
+    [co+' — قائمة المركز المالي'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['الأصول',''],
+    ['قيمة المخزون (منتجات نهائية)', F.finishedVal],
+    ['قيمة المواد الخام', F.rawMatValue],
+    ['ذمم مدينة', F.receivables],
+    ['إجمالي الأصول المتداولة', F.currentAssets],
+    ['صافي الأصول الثابتة', F.fixedAssets],
+    ['إجمالي الأصول', F.totalAssets],
+    [],
+    ['الالتزامات وحقوق الملكية',''],
+    ['ذمم دائنة', F.supplierDebt],
+    ['التزامات ضريبية', F.taxLiab],
+    ['إجمالي الالتزامات', F.totalLiab],
+    ['صافي حقوق الملكية', F.equity],
+    ['إجمالي الالتزامات وحقوق الملكية', F.totalLiab+F.equity],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(bsData), 'المركز المالي');
+
+  // ── Sheet 3: تحليل المصروفات ──────────────────────────────
+  const expRows = [
+    [co+' — تحليل المصروفات'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['الوصف','النوع','الفئة','القسم','المبلغ (ج.م)','التاريخ'],
+    ...getAll('expenses').map(e=>[
+      e.description,
+      e.expenseType==='direct'?'مباشرة':'غير مباشرة',
+      e.category, e.department||'—',
+      Number(e.amount||0), e.expenseDate||'—'
+    ])
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(expRows), 'المصروفات');
+
+  // ── Sheet 4: تكلفة الإنتاج ────────────────────────────────
+  const cogsRows = [
+    [co+' — تكلفة الإنتاج من الفواتير الفعلية'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['أمر الإنتاج','المنتج','المصنع CMO','الكمية','تكلفة المواد','تكلفة CMO',
+     'الإجمالي','تكلفة الوحدة','سعر البيع','هامش الربح %','الحالة'],
+    ...getAll('productionOrders').map(o=>{
+      const p=getById('products',o.productId);
+      const c=getById('cmos',o.cmoId);
+      const bm=getAll('batchMaterials').filter(m=>m.productionOrderId===o.id);
+      const mc=bm.reduce((s,m)=>s+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0);
+      const cc=Number(o.cmoBaseCost||0);
+      const tot=mc+cc;
+      const qty=Number(o.quantity||0);
+      const uc=qty?tot/qty:0;
+      const sp=Number(p?.sellingPrice||0);
+      const mg=sp?((sp-uc)/sp*100).toFixed(1)+'%':'—';
+      return [o.orderNumber||'PO-'+o.id,p?.name||'—',c?.name||'—',qty,mc,cc,tot,uc,sp,mg,o.status];
+    })
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cogsRows), 'تكلفة الإنتاج');
+
+  // ── Sheet 5: المبيعات ─────────────────────────────────────
+  const salesRows = [
+    [co+' — تقرير المبيعات'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['رقم الأمر','الموزع','التاريخ','المبلغ (ج.م)','ضريبة VAT','الإجمالي شامل VAT','الحالة'],
+    ...getAll('deliveryOrders').map(o=>{
+      const d=getById('distributors',o.distributorId);
+      const vat=Number(o.vatAmount||0);
+      return [o.orderNumber||'DO-'+o.id,d?.name||'—',o.orderDate||'—',
+              Number(o.totalAmount||0),vat,Number(o.totalAmount||0)+vat,o.status];
+    })
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(salesRows), 'المبيعات');
+
+  // ── Sheet 6: الميزانية مقابل الفعلي ─────────────────────
+  const budRows = [
+    [co+' — الميزانية مقابل الفعلي'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['الفئة','القسم','السنة','المخطط (ج.م)','الفعلي (ج.م)','الفرق','نسبة الاستهلاك %'],
+    ...getAll('budgetLines').map(b=>{
+      const act=getAll('expenses').filter(e=>e.category===b.category).reduce((s,e)=>s+Number(e.amount||0),0);
+      const bgt=Number(b.budgetedAmount||0);
+      return [b.category,b.department||'—',b.year,bgt,act,bgt-act,
+              bgt>0?((act/bgt)*100).toFixed(1)+'%':'—'];
+    })
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(budRows), 'الميزانية');
+
+  // ── Sheet 7: المخزون ──────────────────────────────────────
+  const invRows = [
+    [co+' — تقرير المخزون الكامل'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['النوع','الصنف','الكمية','الوحدة','تكلفة الوحدة','إجمالي القيمة','تاريخ الانتهاء'],
+    ...getAll('inventory').map(i=>{const p=getById('products',i.productId);return ['منتج نهائي',p?.name||'—',Number(i.quantity||0),p?.unit||'—',Number(i.unitCost||0),Number(i.quantity||0)*Number(i.unitCost||0),i.expiryDate||'—'];}),
+    ...getAll('materials').filter(m=>Number(m.currentStock||0)>0).map(m=>['مادة خام/تغليف',m.name,Number(m.currentStock||0),m.unit,Number(m.unitCost||0),Number(m.currentStock||0)*Number(m.unitCost||0),'—']),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(invRows), 'المخزون');
+
+  // ── Sheet 8: VAT والضرائب ────────────────────────────────
+  const taxRows = [
+    [co+' — تقرير VAT والضرائب'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['ضريبة المبيعات (مخرجات)',F.vatOut],
+    ['ضريبة المشتريات (مدخلات)',F.vatIn],
+    ['صافي VAT المستحق',F.netVat],
+    [],
+    ['الالتزامات الضريبية',''],
+    ['نوع الضريبة','الوصف','المبلغ','الفترة','الحالة'],
+    ...getAll('taxLines').map(t=>[t.taxType,t.description,Number(t.amount||0),t.period||'—',t.status])
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(taxRows), 'VAT والضرائب');
+
+  // ── Sheet 9: ملخص تنفيذي ─────────────────────────────────
+  const summaryRows = [
+    [co+' — الملخص التنفيذي'],
+    ['تاريخ التقرير: '+dt],
+    [],
+    ['المؤشر المالي','القيمة'],
+    ['إجمالي الإيرادات',F.totalRevenue],
+    ['صافي الإيرادات',F.netRevenue],
+    ['مجمل الربح',F.grossProfit],
+    ['هامش مجمل الربح %',(F.grossMargin*100).toFixed(2)+'%'],
+    ['إجمالي المصروفات',F.totalExp],
+    ['صافي الربح / الخسارة',F.netProfit],
+    ['هامش الربح الصافي %',(F.netMargin*100).toFixed(2)+'%'],
+    [],
+    ['إجمالي الأصول',F.totalAssets],
+    ['إجمالي الالتزامات',F.totalLiab],
+    ['صافي حقوق الملكية',F.equity],
+    [],
+    ['قيمة المخزون الكلية',F.totalInvVal],
+    ['تكلفة الإنتاج',F.cogs],
+    ['عدد الموظفين النشطين',F.empCount],
+    ['الرواتب الشهرية',F.monthSalary],
+    ['VAT المستحق',F.netVat],
+    ['التزامات ضريبية معلقة',F.taxLiab],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryRows), 'الملخص التنفيذي');
+
+  XLSX.writeFile(wb, `${co}-Financial-Report-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // renderNav/go called by coEnter() after company is selected
