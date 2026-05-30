@@ -7745,6 +7745,428 @@ PAGES.historicalbalance = function(){
 // يتم في تهيئة DB
 
 
+// ════════════════════════════════════════════════════════════════
+// CLOUD DATABASE LAYER — Firebase Firestore
+// كل الأجهزة تشوف نفس البيانات في الوقت الحقيقي
+// ════════════════════════════════════════════════════════════════
+
+// ── Firebase Config ──────────────────────────────────────────
+// استخدم مشروع Firebase مجاني
+const FIREBASE_CONFIG = {
+  apiKey:            window._fbApiKey     || "YOUR_API_KEY",
+  authDomain:        window._fbAuthDomain || "YOUR_PROJECT.firebaseapp.com",
+  projectId:         window._fbProjectId  || "YOUR_PROJECT_ID",
+  storageBucket:     window._fbStorage    || "YOUR_PROJECT.appspot.com",
+  messagingSenderId: window._fbMsgId      || "YOUR_SENDER_ID",
+  appId:             window._fbAppId      || "YOUR_APP_ID"
+};
+
+// ── Cloud DB State ───────────────────────────────────────────
+let _cloudEnabled    = false;
+let _firestoreDB     = null;
+let _syncInProgress  = false;
+let _lastSyncTime    = null;
+let _pendingWrites   = [];
+let _cloudCompanyId  = null;
+
+// ── Initialize Firebase ──────────────────────────────────────
+async function initCloudDB(companyId) {
+  _cloudCompanyId = companyId;
+
+  // Load Firebase SDK dynamically
+  if(typeof firebase === 'undefined') {
+    await loadScript('https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js');
+    await loadScript('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js');
+  }
+
+  try {
+    if(!firebase.apps.length) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+    }
+    _firestoreDB  = firebase.firestore();
+    _cloudEnabled = true;
+
+    // Enable offline persistence
+    await _firestoreDB.enablePersistence({ synchronizeTabs: true });
+
+    console.log('✅ Cloud DB connected');
+    return true;
+  } catch(e) {
+    console.warn('Cloud DB failed, using localStorage:', e.message);
+    _cloudEnabled = false;
+    return false;
+  }
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if(document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+// ── Cloud Collection Path ────────────────────────────────────
+function cloudPath(table) {
+  return `companies/${_cloudCompanyId}/data`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// OVERRIDE DB FUNCTIONS WITH CLOUD SYNC
+// ════════════════════════════════════════════════════════════════
+
+// --- saveDB: save to localStorage + queue cloud sync ----------
+const _origSaveDB = saveDB;
+function saveDB() {
+  _origSaveDB(); // always save locally first
+  if(_cloudEnabled && _cloudCompanyId) {
+    debouncedCloudSync();
+  }
+}
+
+// Debounce cloud writes (max 1 per 2 seconds)
+let _syncTimer = null;
+function debouncedCloudSync() {
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(pushToCloud, 2000);
+}
+
+// ── Push local DB to Firestore ───────────────────────────────
+async function pushToCloud() {
+  if(!_cloudEnabled || !_firestoreDB || _syncInProgress) return;
+  _syncInProgress = true;
+  updateSyncIndicator('syncing');
+
+  try {
+    const batch = _firestoreDB.batch();
+    const path  = cloudPath();
+
+    // Split DB into chunks (Firestore doc limit 1MB)
+    // Store each table as a separate document
+    const tables = Object.keys(DB).filter(k => k !== '_seq');
+    for(const table of tables) {
+      const ref = _firestoreDB
+        .collection('companies')
+        .doc(_cloudCompanyId)
+        .collection('tables')
+        .doc(table);
+      batch.set(ref, {
+        data:      JSON.stringify(DB[table]),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    // Save seq
+    const seqRef = _firestoreDB
+      .collection('companies')
+      .doc(_cloudCompanyId)
+      .collection('tables')
+      .doc('__seq');
+    batch.set(seqRef, { data: JSON.stringify(DB._seq), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+
+    await batch.commit();
+    _lastSyncTime = new Date();
+    updateSyncIndicator('synced');
+  } catch(e) {
+    console.error('Cloud sync failed:', e);
+    updateSyncIndicator('error');
+  } finally {
+    _syncInProgress = false;
+  }
+}
+
+// ── Pull from Firestore to local ─────────────────────────────
+async function pullFromCloud() {
+  if(!_cloudEnabled || !_firestoreDB) return false;
+  updateSyncIndicator('syncing');
+
+  try {
+    const snapshot = await _firestoreDB
+      .collection('companies')
+      .doc(_cloudCompanyId)
+      .collection('tables')
+      .get();
+
+    if(snapshot.empty) {
+      // First time — push local data to cloud
+      await pushToCloud();
+      return true;
+    }
+
+    // Merge cloud data into local DB
+    snapshot.forEach(doc => {
+      const table = doc.id;
+      if(table === '__seq') {
+        DB._seq = JSON.parse(doc.data().data || '{}');
+      } else if(DB.hasOwnProperty(table)) {
+        DB[table] = JSON.parse(doc.data().data || '[]');
+      }
+    });
+
+    // Save merged data locally
+    _origSaveDB();
+    _lastSyncTime = new Date();
+    updateSyncIndicator('synced');
+    return true;
+  } catch(e) {
+    console.error('Cloud pull failed:', e);
+    updateSyncIndicator('error');
+    return false;
+  }
+}
+
+// ── Real-time listener ───────────────────────────────────────
+let _cloudListener = null;
+function startRealtimeSync() {
+  if(!_cloudEnabled || !_firestoreDB) return;
+  if(_cloudListener) _cloudListener(); // unsubscribe previous
+
+  _cloudListener = _firestoreDB
+    .collection('companies')
+    .doc(_cloudCompanyId)
+    .collection('tables')
+    .onSnapshot(snapshot => {
+      if(_syncInProgress) return; // skip if we're the ones writing
+
+      let changed = false;
+      snapshot.docChanges().forEach(change => {
+        if(change.type === 'modified' || change.type === 'added') {
+          const table = change.doc.id;
+          const newData = JSON.parse(change.doc.data().data || '[]');
+
+          if(table === '__seq') {
+            DB._seq = newData;
+          } else if(DB.hasOwnProperty(table)) {
+            DB[table] = newData;
+            changed = true;
+          }
+        }
+      });
+
+      if(changed) {
+        _origSaveDB();
+        _lastSyncTime = new Date();
+        updateSyncIndicator('synced');
+        // Refresh current page silently
+        refreshCurrentPage();
+      }
+    }, err => {
+      console.error('Realtime sync error:', err);
+      updateSyncIndicator('error');
+    });
+}
+
+function refreshCurrentPage() {
+  // Re-render current page without losing scroll
+  const scrollY = window.scrollY;
+  const page = currentPage;
+  setTimeout(() => {
+    if(PAGES[page]) PAGES[page]();
+    window.scrollTo(0, scrollY);
+  }, 100);
+}
+
+// ════════════════════════════════════════════════════════════════
+// SYNC INDICATOR UI
+// ════════════════════════════════════════════════════════════════
+function updateSyncIndicator(status) {
+  const el = document.getElementById('cloud-sync-indicator');
+  if(!el) return;
+
+  const states = {
+    synced:  { icon:'☁️', text:'محفوظ في Cloud', color:'var(--green-light)', bg:'rgba(46,160,67,.1)' },
+    syncing: { icon:'🔄', text:'جاري المزامنة...', color:'var(--amber)', bg:'rgba(227,179,65,.1)' },
+    error:   { icon:'⚠️', text:'خطأ في الاتصال', color:'var(--red)', bg:'rgba(248,81,73,.1)' },
+    offline: { icon:'💾', text:'حفظ محلي فقط', color:'var(--muted)', bg:'rgba(139,148,158,.1)' },
+    disabled:{ icon:'☁️', text:'اضغط لتفعيل Cloud', color:'var(--muted)', bg:'transparent' },
+  };
+
+  const s = states[status] || states.offline;
+  el.innerHTML = `<span style="font-size:12px">${s.icon}</span> <span style="font-size:11px;color:${s.color}">${s.text}</span>`;
+  el.style.background = s.bg;
+  el.title = _lastSyncTime ? 'آخر مزامنة: '+_lastSyncTime.toLocaleTimeString('ar-EG') : '';
+}
+
+// ════════════════════════════════════════════════════════════════
+// CLOUD SETTINGS MODAL
+// ════════════════════════════════════════════════════════════════
+function showCloudSettings() {
+  const saved = JSON.parse(localStorage.getItem('_pharma_firebase_config')||'{}');
+
+  showModal(modal('☁️ إعدادات قاعدة البيانات السحابية (Firebase)', `
+    <div style="padding:12px;background:rgba(46,160,67,.08);border:1px solid rgba(46,160,67,.2);border-radius:8px;font-size:12px;margin-bottom:16px">
+      <strong>📋 خطوات الإعداد (مجاني 100%):</strong><br>
+      1. روح <a href="https://console.firebase.google.com" target="_blank" style="color:var(--blue)">console.firebase.google.com</a><br>
+      2. اعمل مشروع جديد (New Project)<br>
+      3. Firestore Database → Create Database → Start in test mode<br>
+      4. Project Settings → Your apps → Web app → Copy config<br>
+      5. الصق البيانات هنا وادغط تفعيل
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      ${fg('API Key *',inp('fb-apikey','text',saved.apiKey||'','AIzaSy...'))}
+      ${fg('Project ID *',inp('fb-projectid','text',saved.projectId||'','my-pharma-erp'))}
+      ${fg('Auth Domain',inp('fb-authdomain','text',saved.authDomain||'','PROJECT.firebaseapp.com'))}
+      ${fg('App ID *',inp('fb-appid','text',saved.appId||'','1:xxx:web:xxx'))}
+    </div>
+    ${fg('Company/Database ID (يميز بيانات كل شركة)',inp('fb-company','text',saved.companyId||_cloudCompanyId||'','مثال: medisniya-pharma'))}
+
+    <div style="display:flex;gap:8px;margin-top:4px;margin-bottom:16px">
+      <button class="btn btn-green" onclick="activateCloud()">✅ تفعيل Cloud</button>
+      <button class="btn btn-ghost" onclick="testCloudConnection()">🔌 اختبار الاتصال</button>
+      ${_cloudEnabled?`<button class="btn btn-danger" onclick="disableCloud()">❌ إيقاف Cloud</button>`:''}
+    </div>
+
+    <div id="cloud-test-result" style="font-size:12px;min-height:24px"></div>
+
+    <div style="margin-top:14px;padding:12px;background:rgba(255,255,255,.03);border-radius:8px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:8px">💾 النسخ الاحتياطية</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="exportBackup()">⬇️ تصدير Backup (JSON)</button>
+        <label class="btn btn-ghost btn-sm" style="cursor:pointer">
+          ⬆️ استيراد Backup
+          <input type="file" accept=".json" onchange="importBackup(this)" style="display:none">
+        </label>
+      </div>
+    </div>
+
+    <div style="margin-top:10px;font-size:11px;color:var(--muted)">
+      ${_cloudEnabled ? `✅ Cloud مفعل — آخر مزامنة: ${_lastSyncTime?.toLocaleTimeString('ar-EG')||'—'}` : '⚪ Cloud غير مفعل — البيانات محلية فقط'}
+    </div>
+  `));
+}
+
+async function activateCloud() {
+  const apiKey    = val('fb-apikey');
+  const projectId = val('fb-projectid');
+  const appId     = val('fb-appid');
+  const companyId = val('fb-company') || 'default';
+
+  if(!apiKey || !projectId || !appId) {
+    document.getElementById('cloud-test-result').innerHTML =
+      '<span style="color:var(--red)">⚠️ يرجى تعبئة API Key وProject ID وApp ID</span>';
+    return;
+  }
+
+  const config = {
+    apiKey, projectId, appId,
+    authDomain: val('fb-authdomain') || `${projectId}.firebaseapp.com`,
+    storageBucket: `${projectId}.appspot.com`,
+    companyId
+  };
+
+  // Save config
+  localStorage.setItem('_pharma_firebase_config', JSON.stringify(config));
+
+  // Override global config
+  window._fbApiKey    = config.apiKey;
+  window._fbProjectId = config.projectId;
+  window._fbAppId     = config.appId;
+  window._fbAuthDomain= config.authDomain;
+  window._fbStorage   = config.storageBucket;
+
+  document.getElementById('cloud-test-result').innerHTML =
+    '<span style="color:var(--amber)">🔄 جاري الاتصال...</span>';
+
+  const ok = await initCloudDB(companyId);
+  if(ok) {
+    document.getElementById('cloud-test-result').innerHTML =
+      '<span style="color:var(--green-light)">✅ تم الاتصال! جاري رفع البيانات...</span>';
+    await pullFromCloud();
+    startRealtimeSync();
+    updateSyncIndicator('synced');
+    setTimeout(closeModal, 1500);
+    // Refresh page
+    go(currentPage);
+  } else {
+    document.getElementById('cloud-test-result').innerHTML =
+      '<span style="color:var(--red)">❌ فشل الاتصال — تحقق من البيانات</span>';
+  }
+}
+
+async function testCloudConnection() {
+  const res = document.getElementById('cloud-test-result');
+  res.innerHTML = '<span style="color:var(--amber)">🔄 اختبار...</span>';
+  try {
+    const r = await fetch(`https://firestore.googleapis.com/v1/projects/${val('fb-projectid')}/databases/(default)/documents`);
+    res.innerHTML = r.ok
+      ? '<span style="color:var(--green-light)">✅ Firebase متاح — ادغط تفعيل</span>'
+      : `<span style="color:var(--amber)">⚠️ Firebase يحتاج مفاتيح — كود: ${r.status}</span>`;
+  } catch(e) {
+    res.innerHTML = '<span style="color:var(--red)">❌ لا يوجد اتصال بالإنترنت</span>';
+  }
+}
+
+function disableCloud() {
+  _cloudEnabled = false;
+  if(_cloudListener) { _cloudListener(); _cloudListener = null; }
+  localStorage.removeItem('_pharma_firebase_config');
+  updateSyncIndicator('disabled');
+  closeModal();
+  alert('تم إيقاف Cloud — البيانات محفوظة محلياً');
+}
+
+// ════════════════════════════════════════════════════════════════
+// BACKUP — تصدير واستيراد JSON
+// ════════════════════════════════════════════════════════════════
+function exportBackup() {
+  const data = JSON.stringify(DB, null, 2);
+  const blob  = new Blob([data], {type:'application/json'});
+  const url   = URL.createObjectURL(blob);
+  const a     = document.createElement('a');
+  a.href      = url;
+  a.download  = `pharma-erp-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function importBackup(input) {
+  const file = input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if(!imported.products) throw new Error('ملف غير صحيح');
+      if(!confirm(`استيراد بيانات الـ Backup؟\nسيتم استبدال كل البيانات الحالية.`)) return;
+      Object.assign(DB, imported);
+      saveDB();
+      if(_cloudEnabled) await pushToCloud();
+      alert('✅ تم الاستيراد بنجاح');
+      go(currentPage);
+    } catch(err) {
+      alert('❌ ملف غير صحيح: '+err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ════════════════════════════════════════════════════════════════
+// AUTO-INIT ON LOAD
+// ════════════════════════════════════════════════════════════════
+(async function autoInitCloud() {
+  const saved = JSON.parse(localStorage.getItem('_pharma_firebase_config')||'{}');
+  if(saved.apiKey && saved.projectId && saved.appId) {
+    window._fbApiKey    = saved.apiKey;
+    window._fbProjectId = saved.projectId;
+    window._fbAppId     = saved.appId;
+    window._fbAuthDomain= saved.authDomain;
+    window._fbStorage   = saved.storageBucket;
+
+    const ok = await initCloudDB(saved.companyId || 'default');
+    if(ok) {
+      await pullFromCloud();
+      startRealtimeSync();
+      updateSyncIndicator('synced');
+    } else {
+      updateSyncIndicator('offline');
+    }
+  } else {
+    setTimeout(()=>updateSyncIndicator('disabled'), 500);
+  }
+})();
+
+
 // renderNav/go called by coEnter() after company is selected
 </script>
 
