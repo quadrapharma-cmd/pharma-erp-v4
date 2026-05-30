@@ -5529,6 +5529,1447 @@ function exportFinancialExcel(){
   XLSX.writeFile(wb, `${co}-Financial-Report-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
+// ════════════════════════════════════════════════════════════════
+// FINANCIAL REPORTS v2 — النسخة الكاملة
+// كل البنود المحاسبية طبقاً للمعايير المصرية والدولية
+// ════════════════════════════════════════════════════════════════
+
+PAGES.reports = function(){
+  setPage('التقارير المالية الشاملة',
+    'قوائم مالية كاملة محسوبة تلقائياً من بيانات الشركة',
+    `<div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-green" onclick="exportFinancialExcel()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        تصدير Excel كامل
+      </button>
+      <button class="btn btn-white" onclick="window.print()">🖨️ طباعة</button>
+    </div>`,
+    buildFinancialReports()
+  );
+  initTabs();
+};
+
+// ════════════════════════════════════════════════════════════════
+// CORE CALCULATIONS ENGINE
+// ════════════════════════════════════════════════════════════════
+function calcFinancials(){
+  const dels    = getAll('deliveryOrders');
+  const delItems= getAll('deliveryItems');
+  const exps    = getAll('expenses');
+  const pos     = getAll('productionOrders');
+  const inv     = getAll('inventory');
+  const mats    = getAll('materials');
+  const rcpts   = getAll('materialReceipts');
+  const emps    = getAll('employees');
+  const activeEmps = emps.filter(e=>e.status==='active');
+  const budgets = getAll('budgetLines');
+  const assets  = getAll('assets');
+  const batchM  = getAll('batchMaterials');
+  const taxL    = getAll('taxLines');
+  const recvbl  = getAll('receivables');
+  const purOrds = getAll('purchaseOrders');
+  const payroll = getAll('payrollRuns');
+  const contracts= getAll('contracts');
+  const returns = getAll('returns');
+  const distOrds= dels;
+  const dists   = getAll('distributors');
+  const prods   = getAll('products');
+  const qcChecks= getAll('qualityChecks');
+
+  const now = new Date();
+
+  // ── الإيرادات ──────────────────────────────────────────────
+  const delivered    = dels.filter(d=>d.status==='delivered');
+  const totalRevenue = delivered.reduce((s,d)=>s+Number(d.totalAmount||0),0);
+  const pendingRev   = dels.filter(d=>d.status==='pending').reduce((s,d)=>s+Number(d.totalAmount||0),0);
+  const returnedVal  = returns.reduce((s,r)=>s+Number(r.totalValue||0),0);
+  const discountAmt  = delivered.reduce((s,d)=>s+Number(d.discountAmount||0),0);
+  const netRevenue   = totalRevenue - returnedVal - discountAmt;
+
+  // إيرادات أخرى (فوائد دائنة، إيرادات متنوعة)
+  const otherIncome  = exps.filter(e=>e.description?.includes('فوائد دائنة')||e.description?.includes('إيرادات أخرى')).reduce((s,e)=>-Number(e.amount||0)+s,0);
+  const totalIncome  = netRevenue + otherIncome;
+
+  // إيرادات VAT
+  const vatOut = delivered.reduce((s,d)=>s+Number(d.vatAmount||0),0);
+  const vatIn  = purOrds.filter(p=>p.status==='مستلم').reduce((s,p)=>s+Number(p.vatAmount||0),0);
+  const netVat = vatOut - vatIn;
+
+  // ── تكلفة المبيعات (COGS) ─────────────────────────────────
+  const prodMatCost  = batchM.reduce((s,m)=>s+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0);
+  const cmoCost      = pos.reduce((s,p)=>s+Number(p.cmoBaseCost||0),0);
+  const packagingExp = exps.filter(e=>e.category==='تعبئة وتغليف').reduce((s,e)=>s+Number(e.amount||0),0);
+  const qcCost       = exps.filter(e=>e.category==='جودة ورقابة').reduce((s,e)=>s+Number(e.amount||0),0);
+  const directLabor  = exps.filter(e=>e.category==='رواتب وأجور'&&e.expenseType==='direct').reduce((s,e)=>s+Number(e.amount||0),0);
+  const transportCost= exps.filter(e=>e.category==='نقل المنتج').reduce((s,e)=>s+Number(e.amount||0),0);
+  const cogs         = prodMatCost + cmoCost + packagingExp + qcCost + directLabor + transportCost;
+  const grossProfit  = netRevenue - cogs;
+  const grossMargin  = netRevenue > 0 ? grossProfit/netRevenue : 0;
+
+  // ── المصروفات التشغيلية ───────────────────────────────────
+  const directExp    = exps.filter(e=>e.expenseType==='direct').reduce((s,e)=>s+Number(e.amount||0),0);
+  const indirectExp  = exps.filter(e=>e.expenseType==='indirect').reduce((s,e)=>s+Number(e.amount||0),0);
+  const sellExp      = exps.filter(e=>['دعاية وإعلان','نقل المنتج'].includes(e.category)).reduce((s,e)=>s+Number(e.amount||0),0);
+  const adminExp     = exps.filter(e=>['رواتب وأجور','إيجار','خدمات','مصاريف إدارية','صيانة','تأمين','قانونية ومحاسبة'].includes(e.category)).reduce((s,e)=>s+Number(e.amount||0),0);
+  const regExp       = exps.filter(e=>e.category==='تسجيل دوائي').reduce((s,e)=>s+Number(e.amount||0),0);
+  const totalOpExp   = directExp + indirectExp;
+
+  // إهلاك الأصول الثابتة
+  const annualDepreciation = assets.reduce((s,a)=>{
+    const life = Number(a.usefulLife||0);
+    const cost = Number(a.purchaseCost||0);
+    return s + (life>0 ? cost/life : 0);
+  },0);
+
+  // مصروفات تمويلية
+  const financeExp = exps.filter(e=>e.category==='مصروفات تمويلية'||e.description?.includes('فوائد مدينة')).reduce((s,e)=>s+Number(e.amount||0),0);
+
+  // ── الأرباح ───────────────────────────────────────────────
+  const ebit     = grossProfit - totalOpExp - annualDepreciation;
+  const ebitda   = ebit + annualDepreciation;
+  const ebt      = ebit - financeExp;
+  // ضريبة الدخل الفعلية المدفوعة
+  const incomeTax= taxL.filter(t=>t.taxType==='income'&&t.status==='مدفوع').reduce((s,t)=>s+Number(t.amount||0),0);
+  const netProfit= ebt - incomeTax;
+  const netMargin= netRevenue > 0 ? netProfit/netRevenue : 0;
+
+  // ── المركز المالي — الأصول ───────────────────────────────
+  // أصول متداولة
+  const finishedInvVal  = inv.reduce((s,i)=>s+Number(i.quantity||0)*Number(i.unitCost||0),0);
+  const rawMatVal       = mats.reduce((s,m)=>s+Number(m.currentStock||0)*Number(m.unitCost||0),0);
+  const totalInvVal     = finishedInvVal + rawMatVal;
+  const tradeReceivables= recvbl.filter(r=>r.status!=='محصّل').reduce((s,r)=>s+Number(r.amount||0),0);
+  const pendingDelivVal = pendingRev;
+  const prepaid         = exps.filter(e=>e.description?.includes('مقدم')||e.description?.includes('دفعة مقدمة')).reduce((s,e)=>s+Number(e.amount||0),0);
+  const cashOnHand      = 0; // من وحدة النقدية لو أضيفت
+  const totalCurrentAssets = totalInvVal + tradeReceivables + pendingDelivVal + cashOnHand;
+
+  // أصول غير متداولة
+  const grossFixedAssets = assets.reduce((s,a)=>s+Number(a.purchaseCost||0),0);
+  const accDepreciation  = assets.reduce((s,a)=>s+Number(a.accDepreciation||0),0);
+  const netFixedAssets   = grossFixedAssets - accDepreciation;
+  const regFeesAsset     = getAll('registrations').reduce((s,r)=>s+Number(r.registrationFee||0),0);
+  const totalNonCurrentAssets = netFixedAssets + regFeesAsset;
+  const totalAssets      = totalCurrentAssets + totalNonCurrentAssets;
+
+  // ── المركز المالي — الالتزامات ───────────────────────────
+  // متداولة
+  const supplierDebt    = purOrds.filter(p=>p.status==='معلق').reduce((s,p)=>s+Number(p.totalAmount||0),0);
+  const taxLiab         = taxL.filter(t=>t.status==='معلق').reduce((s,t)=>s+Number(t.amount||0),0);
+  const vatLiab         = netVat > 0 ? netVat : 0;
+  const accruals        = activeEmps.reduce((s,e)=>s+Number(e.salary||0),0); // رواتب مستحقة
+  const totalCurrentLiab= supplierDebt + taxLiab + vatLiab;
+
+  // غير متداولة
+  const longTermLoans   = 0;
+  const totalNonCurrLiab= longTermLoans;
+  const totalLiab       = totalCurrentLiab + totalNonCurrLiab;
+
+  // حقوق الملكية
+  const paidCapital     = 0; // من بيانات الشركة
+  const retainedEarnings= netRevenue - totalOpExp - cogs;
+  const equity          = totalAssets - totalLiab;
+
+  // ── التدفقات النقدية ──────────────────────────────────────
+  // تشغيلية
+  const cfOperating = netProfit + annualDepreciation
+    - (tradeReceivables)  // زيادة ذمم مدينة
+    + (supplierDebt)       // زيادة ذمم دائنة
+    - (totalInvVal * 0.1); // تغير المخزون (تقريبي)
+
+  // استثمارية
+  const cfInvesting = -grossFixedAssets; // شراء أصول
+
+  // تمويلية
+  const cfFinancing = payroll.reduce((s,r)=>s-Number(r.totalAmount||0),0)
+    + contracts.reduce((s,c)=>s+Number(c.value||0),0);
+
+  const netCashFlow = cfOperating + cfInvesting + cfFinancing;
+
+  // ── الذمم AR/AP Aging ────────────────────────────────────
+  const arAging = { current:0, d30:0, d60:0, d90:0, over90:0 };
+  recvbl.forEach(r=>{
+    if(r.status==='محصّل') return;
+    const days = r.dueDate ? Math.floor((now-new Date(r.dueDate))/86400000) : 0;
+    const amt  = Number(r.amount||0);
+    if(days <= 0)        arAging.current += amt;
+    else if(days <= 30)  arAging.d30 += amt;
+    else if(days <= 60)  arAging.d60 += amt;
+    else if(days <= 90)  arAging.d90 += amt;
+    else                 arAging.over90 += amt;
+  });
+
+  const apAging = { current:0, d30:0, d60:0, d90:0, over90:0 };
+  purOrds.filter(p=>p.status==='معلق').forEach(p=>{
+    const days = p.orderDate ? Math.floor((now-new Date(p.orderDate))/86400000) : 0;
+    const amt  = Number(p.totalAmount||0);
+    if(days <= 30)       apAging.current += amt;
+    else if(days <= 60)  apAging.d30 += amt;
+    else if(days <= 90)  apAging.d60 += amt;
+    else if(days <= 120) apAging.d90 += amt;
+    else                 apAging.over90 += amt;
+  });
+
+  // ── مبيعات حسب المنتج ────────────────────────────────────
+  const salesByProduct = {};
+  delItems.forEach(item=>{
+    if(!item.productId) return;
+    const p = getById('products', item.productId);
+    const name = p?.name||'منتج غير محدد';
+    if(!salesByProduct[name]) salesByProduct[name]={qty:0,amount:0};
+    salesByProduct[name].qty    += Number(item.quantity||0);
+    salesByProduct[name].amount += Number(item.totalPrice||0);
+  });
+  delivered.forEach(o=>{
+    if(!getAll('deliveryItems').find(i=>i.deliveryOrderId===o.id)){
+      const d = getById('distributors',o.distributorId);
+      const key = 'توريد - '+(d?.name||'موزع');
+      if(!salesByProduct[key]) salesByProduct[key]={qty:1,amount:0};
+      salesByProduct[key].amount += Number(o.totalAmount||0);
+    }
+  });
+
+  // ── مبيعات vs أهداف ──────────────────────────────────────
+  const targets     = getAll('salesTargets');
+  const targetTotal = targets.reduce((s,t)=>s+Number(t.targetAmount||0),0);
+  const targetAchievement = targetTotal>0 ? totalRevenue/targetTotal : 0;
+
+  // ── مصروفات عمومية مفصلة ──────────────────────────────────
+  const expByCat = {};
+  const expByDept= {};
+  const expByMonth={};
+  exps.forEach(e=>{
+    expByCat[e.category]  = (expByCat[e.category]||0)  + Number(e.amount||0);
+    const dept = e.department||'غير محدد';
+    expByDept[dept]       = (expByDept[dept]||0)       + Number(e.amount||0);
+    const m = e.expenseDate?e.expenseDate.slice(0,7):'غير محدد';
+    expByMonth[m]         = (expByMonth[m]||0)         + Number(e.amount||0);
+  });
+
+  // top 10 expenses
+  const top10Exp = [...exps].sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).slice(0,10);
+
+  // ── مؤشرات المخزون ───────────────────────────────────────
+  const invTurnover = totalInvVal>0 ? cogs/totalInvVal : 0;
+  const daysInv     = invTurnover>0 ? 365/invTurnover : 0;
+  const expiredInv  = inv.filter(i=>i.expiryDate&&new Date(i.expiryDate)<now);
+  const expiredVal  = expiredInv.reduce((s,i)=>s+Number(i.quantity||0)*Number(i.unitCost||0),0);
+
+  // ── الموظفون ─────────────────────────────────────────────
+  const totalMonthlySalary = activeEmps.reduce((s,e)=>s+Number(e.salary||0)+Number(e.allowances||0)-Number(e.deductions||0),0);
+  const byDept = {};
+  activeEmps.forEach(e=>{ byDept[e.department]=(byDept[e.department]||{count:0,salary:0}); byDept[e.department].count++; byDept[e.department].salary+=Number(e.salary||0); });
+
+  // ── الأصول الثابتة وجدول الإهلاك ─────────────────────────
+  const assetsByCategory = {};
+  assets.forEach(a=>{
+    const cat=a.category||'أخرى';
+    if(!assetsByCategory[cat]) assetsByCategory[cat]={cost:0,dep:0,net:0,count:0};
+    assetsByCategory[cat].cost  += Number(a.purchaseCost||0);
+    assetsByCategory[cat].dep   += Number(a.accDepreciation||0);
+    assetsByCategory[cat].net   += Number(a.purchaseCost||0)-Number(a.accDepreciation||0);
+    assetsByCategory[cat].count++;
+  });
+
+  // ── التسجيل الدوائي ───────────────────────────────────────
+  const regs = getAll('registrations');
+  const expiredRegs = regs.filter(r=>r.expiryDate&&new Date(r.expiryDate)<now);
+  const expiring90  = regs.filter(r=>r.expiryDate&&(new Date(r.expiryDate)-now)/86400000<=90&&new Date(r.expiryDate)>now);
+  const totalRegFees= regs.reduce((s,r)=>s+Number(r.registrationFee||0)+Number(r.renewalFee||0),0);
+
+  return {
+    // إيرادات
+    totalRevenue, pendingRev, returnedVal, discountAmt, netRevenue,
+    otherIncome, totalIncome, vatOut, vatIn, netVat,
+    // COGS
+    prodMatCost, cmoCost, packagingExp, qcCost, directLabor, transportCost, cogs,
+    grossProfit, grossMargin,
+    // مصروفات
+    directExp, indirectExp, sellExp, adminExp, regExp, totalOpExp,
+    annualDepreciation, financeExp,
+    expByCat, expByDept, expByMonth, top10Exp,
+    // الأرباح
+    ebit, ebitda, ebt, incomeTax, netProfit, netMargin,
+    // المركز المالي
+    finishedInvVal, rawMatVal, totalInvVal,
+    tradeReceivables, pendingDelivVal, cashOnHand, prepaid, totalCurrentAssets,
+    grossFixedAssets, accDepreciation, netFixedAssets, regFeesAsset, totalNonCurrentAssets,
+    totalAssets,
+    supplierDebt, taxLiab, vatLiab, accruals, totalCurrentLiab,
+    longTermLoans, totalNonCurrLiab, totalLiab, equity, paidCapital, retainedEarnings,
+    // تدفقات
+    cfOperating, cfInvesting, cfFinancing, netCashFlow,
+    // AR/AP Aging
+    arAging, apAging,
+    // مبيعات
+    salesByProduct, targets, targetTotal, targetAchievement,
+    topDist: (()=>{const m=new Map();delivered.forEach(o=>{const d=getById('distributors',o.distributorId);if(d)m.set(d.name,(m.get(d.name)||0)+Number(o.totalAmount||0));});return[...m.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5);})(),
+    distCount: getAll('distributors').filter(d=>d.status==='active').length,
+    // مخزون
+    invTurnover, daysInv, expiredInv, expiredVal,
+    // موظفون
+    empCount: activeEmps.length, totalMonthlySalary, byDept,
+    lastPayroll: payroll.slice(-1)[0],
+    // أصول
+    assetsByCategory,
+    // ضرائب
+    taxL,
+    // تسجيل
+    regs, expiredRegs, expiring90, totalRegFees,
+    // ميزانية
+    totalBudget: budgets.reduce((s,b)=>s+Number(b.budgetedAmount||0),0),
+    budgets,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ════════════════════════════════════════════════════════════════
+function plRow(label, value, cls='', indent=0, bold=false, borderTop=false){
+  const pad = indent ? `padding-right:${indent*20}px` : '';
+  const bt  = borderTop ? 'border-top:2px solid var(--border);margin-top:6px;padding-top:8px' : '';
+  const isNeg = typeof value==='number' && value<0;
+  const color = isNeg ? 'color:var(--red)' : '';
+  const display = typeof value==='number'
+    ? (isNeg ? `(${fmt(Math.abs(value))}) ج.م` : `${fmt(value)} ج.م`)
+    : value;
+  return `<div style="display:flex;justify-content:space-between;padding:6px 0;${bt};${pad}">
+    <span style="color:var(--${bold?'text':'muted'});font-weight:${bold?700:400};font-size:${bold?'13px':'12px'}">${label}</span>
+    <span class="${cls}" style="${color};font-weight:${bold?700:500};font-size:${bold?'14px':'12px'};min-width:140px;text-align:left">${display}</span>
+  </div>`;
+}
+
+function kpiCard(label, value, sub='', color='text-blue', icon=''){
+  const display = typeof value==='number' ? fmt(value)+' ج.م' : value;
+  const isNeg = typeof value==='number' && value<0;
+  return `<div class="stat-card">
+    <div class="lbl">${icon} ${label}</div>
+    <div class="val ${isNeg?'text-red':color}" style="font-size:18px">${display}</div>
+    ${sub?`<div class="sub">${sub}</div>`:''}
+  </div>`;
+}
+
+function agingTable(data, title, colorCls){
+  const total = Object.values(data).reduce((s,v)=>s+v,0);
+  if(!total) return `<div class="empty">لا توجد ذمم مسجلة</div>`;
+  return `<h3 style="font-size:13px;font-weight:700;color:var(--muted);margin:12px 0 8px;text-transform:uppercase">${title}</h3>
+  ${[['جارية (لم تستحق)',data.current],['1-30 يوم',data.d30],['31-60 يوم',data.d60],['61-90 يوم',data.d90],['أكثر من 90 يوم',data.over90]].map(([label,val])=>{
+    const pct=total>0?val/total:0;
+    const isLate=label.includes('60')||label.includes('90')||label.includes('أكثر');
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px">
+      <span style="min-width:130px;color:var(--muted)">${label}</span>
+      <div style="flex:1;height:6px;background:rgba(255,255,255,.08);border-radius:3px">
+        <div style="height:100%;width:${pct*100}%;background:${isLate?'var(--red)':'var(--green-light)'};border-radius:3px"></div>
+      </div>
+      <span class="${isLate&&val>0?'text-red fw7':''}" style="min-width:110px;text-align:left">${fmt(val)} ج.م (${(pct*100).toFixed(0)}%)</span>
+    </div>`;
+  }).join('')}
+  <div style="display:flex;justify-content:space-between;padding-top:6px;border-top:1px solid var(--border);font-weight:700;font-size:12px">
+    <span>الإجمالي</span><span class="${colorCls}">${fmt(total)} ج.م</span>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// BUILD REPORTS PAGE
+// ════════════════════════════════════════════════════════════════
+function buildFinancialReports(){
+  const F = calcFinancials();
+  return `
+  <div class="tabs" style="flex-wrap:wrap;gap:3px">
+    <button class="tab active" data-group="rpt" data-tab="rpt-pl">📄 قائمة الدخل</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-bs">🏦 المركز المالي</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-cf">💧 التدفقات النقدية</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-cogs">🏭 تكلفة الإنتاج</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-exp">🧾 تحليل المصروفات</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-bud">💰 الميزانية</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-inv">📦 المخزون</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-sales">🚚 المبيعات</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-aging">⏱️ الذمم AR/AP</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-assets">🏗️ الأصول والإهلاك</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-emp">👥 الموظفون</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-tax">🧾 الضرائب وVAT</button>
+    <button class="tab" data-group="rpt" data-tab="rpt-reg">📑 التسجيل الدوائي</button>
+  </div>
+
+  <div id="rpt-pl"    class="tab-pane" data-group="rpt">${reportPL(F)}</div>
+  <div id="rpt-bs"    class="tab-pane" data-group="rpt" style="display:none">${reportBS(F)}</div>
+  <div id="rpt-cf"    class="tab-pane" data-group="rpt" style="display:none">${reportCF(F)}</div>
+  <div id="rpt-cogs"  class="tab-pane" data-group="rpt" style="display:none">${reportCOGS(F)}</div>
+  <div id="rpt-exp"   class="tab-pane" data-group="rpt" style="display:none">${reportExpenses(F)}</div>
+  <div id="rpt-bud"   class="tab-pane" data-group="rpt" style="display:none">${reportBudget(F)}</div>
+  <div id="rpt-inv"   class="tab-pane" data-group="rpt" style="display:none">${reportInventory(F)}</div>
+  <div id="rpt-sales" class="tab-pane" data-group="rpt" style="display:none">${reportSales(F)}</div>
+  <div id="rpt-aging" class="tab-pane" data-group="rpt" style="display:none">${reportAging(F)}</div>
+  <div id="rpt-assets"class="tab-pane" data-group="rpt" style="display:none">${reportAssets(F)}</div>
+  <div id="rpt-emp"   class="tab-pane" data-group="rpt" style="display:none">${reportEmployees(F)}</div>
+  <div id="rpt-tax"   class="tab-pane" data-group="rpt" style="display:none">${reportTax(F)}</div>
+  <div id="rpt-reg"   class="tab-pane" data-group="rpt" style="display:none">${reportRegistration(F)}</div>
+  `;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 1. INCOME STATEMENT — قائمة الدخل الكاملة
+// ════════════════════════════════════════════════════════════════
+function reportPL(F){
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('صافي الإيرادات',F.netRevenue,'','text-green','💰')}
+    ${kpiCard('مجمل الربح',F.grossProfit,'هامش: '+(F.grossMargin*100).toFixed(1)+'%',F.grossProfit>=0?'text-green':'text-red','📊')}
+    ${kpiCard('ربح التشغيل (EBIT)',F.ebit,'قبل الفوائد والضرائب',F.ebit>=0?'text-green':'text-red','⚙️')}
+    ${kpiCard('صافي الربح / الخسارة',F.netProfit,'هامش: '+(F.netMargin*100).toFixed(1)+'%',F.netProfit>=0?'text-green':'text-red','📈')}
+  </div>
+  <div class="stats-grid g3" style="margin-bottom:16px">
+    ${kpiCard('EBITDA',F.ebitda,'ربح قبل الإهلاك والفوائد والضرائب',F.ebitda>=0?'text-green':'text-red','📐')}
+    ${kpiCard('إهلاك الأصول',F.annualDepreciation,'سنوي','text-amber','🏗️')}
+    ${kpiCard('ضريبة الدخل المدفوعة',F.incomeTax,'','text-red','🏦')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:3fr 2fr;gap:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+        📄 قائمة الدخل — Income Statement
+      </h2>
+
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">الإيرادات</div>
+      ${plRow('إيرادات المبيعات', F.totalRevenue)}
+      ${plRow('(مردودات ومرتجعات)', -F.returnedVal,'',1)}
+      ${plRow('(خصم مسموح به)', -F.discountAmt,'',1)}
+      ${plRow('صافي إيرادات النشاط', F.netRevenue,'text-green fw7',0,true,true)}
+      ${F.otherIncome ? plRow('إيرادات أخرى (فوائد دائنة)', F.otherIncome,'',1) : ''}
+      ${plRow('إجمالي الإيرادات', F.totalIncome,'text-green fw7',0,true)}
+
+      <div style="height:8px"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">تكلفة المبيعات (COGS)</div>
+      ${plRow('تكلفة المواد الخام (من الفواتير الفعلية)', -F.prodMatCost,'',1)}
+      ${plRow('تكلفة التصنيع CMO', -F.cmoCost,'',1)}
+      ${plRow('تكاليف التغليف والتعبئة', -F.packagingExp,'',1)}
+      ${plRow('تكاليف جودة ورقابة QC', -F.qcCost,'',1)}
+      ${plRow('عمالة مباشرة', -F.directLabor,'',1)}
+      ${plRow('نقل المنتج', -F.transportCost,'',1)}
+      ${plRow('إجمالي تكلفة المبيعات', -F.cogs,'text-red',0,true)}
+      ${plRow('مجمل الربح (Gross Profit)', F.grossProfit,F.grossProfit>=0?'text-green fw7':'text-red fw7',0,true,true)}
+      <div style="color:var(--muted);font-size:11px;padding:2px 0">هامش مجمل الربح: ${(F.grossMargin*100).toFixed(2)}%</div>
+
+      <div style="height:8px"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">المصروفات التشغيلية</div>
+      ${plRow('مصروفات بيع وتوزيع وتسويق', -F.sellExp,'',1)}
+      ${plRow('مصروفات عمومية وإدارية', -F.adminExp,'',1)}
+      ${plRow('تكاليف التسجيل الدوائي', -F.regExp,'',1)}
+      ${plRow('مصروفات مباشرة أخرى', -(F.directExp-F.sellExp-F.adminExp-F.regExp>0?F.directExp-F.sellExp-F.adminExp-F.regExp:0),'',1)}
+      ${plRow('مصروفات غير مباشرة', -F.indirectExp,'',1)}
+      ${plRow('إهلاك الأصول الثابتة', -F.annualDepreciation,'',1)}
+      ${plRow('إجمالي المصروفات التشغيلية', -F.totalOpExp-F.annualDepreciation,'text-red',0,true)}
+
+      ${plRow('ربح التشغيل (EBIT)', F.ebit,F.ebit>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+      <div style="height:8px"></div>
+      ${plRow('مصروفات تمويلية وفوائد مدينة', -F.financeExp,'',1)}
+      ${plRow('الربح قبل الضريبة (EBT)', F.ebt,F.ebt>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+      ${plRow('ضريبة الدخل', -F.incomeTax,'',1)}
+
+      <div style="height:10px;border-top:2px solid ${F.netProfit>=0?'var(--green)':'var(--red)'};margin-top:8px"></div>
+      ${plRow(F.netProfit>=0?'✅ صافي الربح':'❌ صافي الخسارة', F.netProfit,
+        F.netProfit>=0?'text-green fw7':'text-red fw7',0,true)}
+      <div style="color:var(--muted);font-size:11px">هامش الربح الصافي: ${(F.netMargin*100).toFixed(2)}%</div>
+      <div style="color:var(--muted);font-size:11px">EBITDA: ${fmt(F.ebitda)} ج.م</div>
+    </div>
+
+    <div>
+      <div class="card" style="padding:20px;margin-bottom:16px">
+        <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📊 توزيع التكاليف</h2>
+        ${[[' مواد خام',F.prodMatCost,'var(--blue)'],['CMO',F.cmoCost,'var(--amber)'],
+           ['تغليف',F.packagingExp,'var(--purple)'],['عمالة مباشرة',F.directLabor,'var(--green-light)'],
+           ['مصروفات تشغيلية',F.totalOpExp,'var(--red)'],['إهلاك',F.annualDepreciation,'var(--muted)']
+          ].filter(([,v])=>v>0).map(([l,v,c])=>{
+            const tot=F.cogs+F.totalOpExp+F.annualDepreciation;
+            const pct=tot>0?v/tot:0;
+            return `<div style="margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+                <span>${l}</span><span class="fw7">${(pct*100).toFixed(1)}%</span>
+              </div>
+              <div style="height:5px;background:rgba(255,255,255,.08);border-radius:3px">
+                <div style="height:100%;width:${pct*100}%;background:${c};border-radius:3px"></div>
+              </div>
+            </div>`;
+          }).join('')}
+      </div>
+      <div class="card" style="padding:20px">
+        <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">🎯 مؤشرات الأداء</h2>
+        ${[['هامش مجمل الربح',(F.grossMargin*100).toFixed(1)+'%',F.grossMargin>=0.3],
+           ['هامش EBIT',(F.netRevenue>0?(F.ebit/F.netRevenue*100).toFixed(1):0)+'%',F.ebit>0],
+           ['هامش EBITDA',(F.netRevenue>0?(F.ebitda/F.netRevenue*100).toFixed(1):0)+'%',F.ebitda>0],
+           ['هامش صافي الربح',(F.netMargin*100).toFixed(1)+'%',F.netMargin>0],
+           ['نسبة COGS',(F.netRevenue>0?(F.cogs/F.netRevenue*100).toFixed(1):0)+'%',F.cogs/F.netRevenue<0.6],
+           ['نسبة المصروفات',(F.netRevenue>0?(F.totalOpExp/F.netRevenue*100).toFixed(1):0)+'%',F.totalOpExp/F.netRevenue<0.3],
+          ].map(([l,v,good])=>`
+          <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">
+            <span style="color:var(--muted)">${l}</span>
+            <span class="${good?'text-green':'text-red'} fw7">${v}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 2. BALANCE SHEET — المركز المالي الكامل
+// ════════════════════════════════════════════════════════════════
+function reportBS(F){
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي الأصول',F.totalAssets,'','text-blue','🏦')}
+    ${kpiCard('إجمالي الالتزامات',F.totalLiab,'','text-red','⚠️')}
+    ${kpiCard('صافي حقوق الملكية',F.equity,'',F.equity>=0?'text-green':'text-red','💼')}
+    <div class="stat-card">
+      <div class="lbl">📊 نسبة السيولة</div>
+      <div class="val ${F.totalCurrentLiab>0&&F.totalCurrentAssets/F.totalCurrentLiab>1?'text-green':'text-red'}" style="font-size:18px">
+        ${F.totalCurrentLiab>0?(F.totalCurrentAssets/F.totalCurrentLiab).toFixed(2)+'x':'—'}
+      </div>
+      <div class="sub">أصول متداولة / التزامات متداولة</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--blue);font-size:15px;font-weight:700;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid rgba(56,139,253,.3)">
+        📈 الأصول — Assets
+      </h2>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">أصول متداولة (Current Assets)</div>
+      ${plRow('نقدية وما في حكمها', F.cashOnHand,'',1)}
+      ${plRow('مخزون المنتجات النهائية', F.finishedInvVal,'',1)}
+      ${plRow('مخزون المواد الخام والتغليف', F.rawMatVal,'',1)}
+      ${plRow('ذمم مدينة (عملاء وأوراق قبض)', F.tradeReceivables,'',1)}
+      ${plRow('مبيعات قيد التحصيل (معلقة)', F.pendingDelivVal,'',1)}
+      ${plRow('مدفوعات مقدمة', F.prepaid,'',1)}
+      ${plRow('إجمالي الأصول المتداولة', F.totalCurrentAssets,'text-blue fw7',0,true,true)}
+
+      <div style="height:8px"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">أصول غير متداولة (Non-Current Assets)</div>
+      ${plRow('الأصول الثابتة (التكلفة)', F.grossFixedAssets,'',1)}
+      ${plRow('(مجمع الإهلاك)', -F.accDepreciation,'',1)}
+      ${plRow('صافي الأصول الثابتة', F.netFixedAssets,'',1)}
+      ${plRow('رسوم تسجيل وتراخيص (رسملة)', F.regFeesAsset,'',1)}
+      ${plRow('إجمالي الأصول غير المتداولة', F.totalNonCurrentAssets,'text-blue fw7',0,true,true)}
+
+      <div style="height:10px;border-top:2px solid var(--blue);margin-top:8px"></div>
+      ${plRow('إجمالي الأصول', F.totalAssets,'text-blue fw7',0,true)}
+    </div>
+
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--red);font-size:15px;font-weight:700;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid rgba(248,81,73,.3)">
+        📉 الالتزامات وحقوق الملكية
+      </h2>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">التزامات متداولة (Current Liabilities)</div>
+      ${plRow('ذمم دائنة (موردون وأوراق دفع)', F.supplierDebt,'',1)}
+      ${plRow('التزامات ضريبية معلقة', F.taxLiab,'',1)}
+      ${plRow('ضريبة قيمة مضافة مستحقة', F.vatLiab,'',1)}
+      ${plRow('رواتب مستحقة الصرف', F.accruals,'',1)}
+      ${plRow('إجمالي الالتزامات المتداولة', F.totalCurrentLiab,'text-red fw7',0,true,true)}
+
+      <div style="height:8px"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">التزامات غير متداولة (Non-Current Liabilities)</div>
+      ${plRow('قروض وتسهيلات بنكية طويلة الأجل', F.longTermLoans,'',1)}
+      ${plRow('إجمالي الالتزامات غير المتداولة', F.totalNonCurrLiab,'text-red fw7',0,true,true)}
+      ${plRow('إجمالي الالتزامات', F.totalLiab,'text-red fw7',0,true,true)}
+
+      <div style="height:8px"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">حقوق الملكية (Equity)</div>
+      ${plRow('رأس المال المدفوع', F.paidCapital,'',1)}
+      ${plRow('الأرباح المرحلة (Retained Earnings)', F.retainedEarnings,'',1)}
+      ${plRow('صافي ربح (خسارة) الفترة', F.netProfit,'',1)}
+      ${plRow('إجمالي حقوق الملكية', F.equity,F.equity>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+      <div style="height:10px;border-top:2px solid var(--red);margin-top:8px"></div>
+      ${plRow('إجمالي الالتزامات وحقوق الملكية', F.totalLiab+F.equity,'text-red fw7',0,true)}
+
+      <div style="margin-top:14px;padding:10px;background:rgba(255,255,255,.03);border-radius:8px;font-size:11px">
+        <div style="font-weight:700;margin-bottom:6px">📐 مؤشرات المركز المالي</div>
+        ${[['نسبة الدين للأصول',F.totalAssets>0?(F.totalLiab/F.totalAssets*100).toFixed(1)+'%':'—',F.totalLiab/F.totalAssets<0.5],
+           ['نسبة التداول',F.totalCurrentLiab>0?(F.totalCurrentAssets/F.totalCurrentLiab).toFixed(2)+'x':'—',F.totalCurrentAssets/F.totalCurrentLiab>1.5],
+           ['رأس المال العامل',fmt(F.totalCurrentAssets-F.totalCurrentLiab)+' ج.م',F.totalCurrentAssets>F.totalCurrentLiab],
+           ['نسبة حقوق الملكية',F.totalAssets>0?(F.equity/F.totalAssets*100).toFixed(1)+'%':'—',F.equity/F.totalAssets>0.5],
+          ].map(([l,v,good])=>`<div style="display:flex;justify-content:space-between;padding:3px 0">
+            <span style="color:var(--muted)">${l}</span>
+            <span class="${good?'text-green':'text-red'} fw7">${v}</span>
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 3. CASH FLOW — قائمة التدفقات النقدية
+// ════════════════════════════════════════════════════════════════
+function reportCF(F){
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('التدفق التشغيلي',F.cfOperating,'من العمليات اليومية',F.cfOperating>=0?'text-green':'text-red','⚙️')}
+    ${kpiCard('التدفق الاستثماري',F.cfInvesting,'شراء وبيع أصول',F.cfInvesting>=0?'text-green':'text-red','📈')}
+    ${kpiCard('التدفق التمويلي',F.cfFinancing,'قروض وعقود',F.cfFinancing>=0?'text-green':'text-red','💼')}
+    ${kpiCard('صافي التدفق النقدي',F.netCashFlow,'',F.netCashFlow>=0?'text-green':'text-red','💧')}
+  </div>
+
+  <div class="card" style="padding:24px;max-width:700px">
+    <h2 style="font-size:15px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)">
+      💧 قائمة التدفقات النقدية — Cash Flow Statement
+    </h2>
+
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">أولاً: التدفقات من الأنشطة التشغيلية</div>
+    ${plRow('صافي ربح (خسارة) الفترة', F.netProfit)}
+    <div style="color:var(--muted);font-size:11px;padding:2px 0 4px 0">التسويات:</div>
+    ${plRow('يضاف: إهلاك الأصول الثابتة', F.annualDepreciation,'',1)}
+    ${plRow('(زيادة) نقص في المخزون', 0,'',1)}
+    ${plRow('(زيادة) نقص في الذمم المدينة', -F.tradeReceivables,'',1)}
+    ${plRow('زيادة (نقص) في الذمم الدائنة', F.supplierDebt,'',1)}
+    ${plRow('زيادة (نقص) في الالتزامات الضريبية', F.taxLiab,'',1)}
+    ${plRow('صافي التدفق من الأنشطة التشغيلية', F.cfOperating,F.cfOperating>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+    <div style="height:8px"></div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">ثانياً: التدفقات من الأنشطة الاستثمارية</div>
+    ${plRow('(مدفوعات) لشراء أصول ثابتة', -F.grossFixedAssets,'',1)}
+    ${plRow('(مدفوعات) رسوم تسجيل وتراخيص', -F.regFeesAsset,'',1)}
+    ${plRow('صافي التدفق من الأنشطة الاستثمارية', F.cfInvesting,F.cfInvesting>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+    <div style="height:8px"></div>
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px">ثالثاً: التدفقات من الأنشطة التمويلية</div>
+    ${plRow('قروض مستلمة', F.longTermLoans,'',1)}
+    ${plRow('(رواتب وعقود مدفوعة)', F.cfFinancing,'',1)}
+    ${plRow('صافي التدفق من الأنشطة التمويلية', F.cfFinancing,F.cfFinancing>=0?'text-green fw7':'text-red fw7',0,true,true)}
+
+    <div style="height:12px;border-top:2px solid ${F.netCashFlow>=0?'var(--green)':'var(--red)'};margin-top:8px"></div>
+    ${plRow('صافي التغير في النقدية', F.netCashFlow,F.netCashFlow>=0?'text-green fw7':'text-red fw7',0,true)}
+    ${plRow('رصيد النقدية أول الفترة', F.cashOnHand,'',0)}
+    ${plRow('رصيد النقدية آخر الفترة', F.cashOnHand+F.netCashFlow,'text-blue fw7',0,true)}
+
+    <div style="margin-top:14px;padding:10px;background:rgba(248,81,73,.06);border:1px solid rgba(248,81,73,.2);border-radius:8px;font-size:11px;color:var(--muted)">
+      ⚠️ <strong>ملاحظة:</strong> هذه القائمة تقريبية محسوبة من البيانات المتاحة. لقائمة دقيقة 100% أضف وحدة النقدية ورصيد الصندوق والبنوك.
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 4. COGS ANALYSIS
+// ════════════════════════════════════════════════════════════════
+function reportCOGS(F){
+  const pos    = getAll('productionOrders');
+  const batchM = getAll('batchMaterials');
+  const prods  = getAll('products');
+
+  const prodCosts = prods.map(p=>{
+    const pOrders = pos.filter(o=>o.productId===p.id);
+    const matCost = pOrders.reduce((s,o)=>s+batchM.filter(m=>m.productionOrderId===o.id).reduce((x,m)=>x+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0),0);
+    const cmoCost = pOrders.reduce((s,o)=>s+Number(o.cmoBaseCost||0),0);
+    const totalQty= pOrders.reduce((s,o)=>s+Number(o.quantity||0),0);
+    const total   = matCost+cmoCost;
+    const unitCost= totalQty>0?total/totalQty:0;
+    const sell    = Number(p.sellingPrice||0);
+    const margin  = sell>0?(sell-unitCost)/sell:0;
+    const released= pOrders.filter(o=>o.bprStatus==='released').length;
+    const yieldRate= pOrders.length>0?released/pOrders.length:0;
+    return {name:p.name,matCost,cmoCost,total,totalQty,unitCost,sell,margin,batches:pOrders.length,released,yieldRate};
+  }).filter(p=>p.total>0||p.batches>0);
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('تكلفة المواد (من الفواتير)',F.prodMatCost,'','text-blue','🧪')}
+    ${kpiCard('تكلفة التصنيع CMO',F.cmoCost,'','text-amber','🏭')}
+    ${kpiCard('تكاليف إضافية',F.packagingExp+F.qcCost+F.directLabor,'تغليف + جودة + عمالة','text-purple','➕')}
+    ${kpiCard('إجمالي تكلفة الإنتاج',F.cogs,'','text-red','💰')}
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-head"><h2>📊 تكلفة كل منتج — تفصيل كامل</h2></div>
+    ${tbl(['المنتج','التشغيلات','الكمية','تكلفة المواد','تكلفة CMO','إجمالي التكلفة',
+           'تكلفة الوحدة','سعر البيع','هامش %','Yield Rate','حالة'],
+      prodCosts.length?prodCosts.map(p=>tr(
+        `<strong>${p.name}</strong>`,p.batches,fmtN(p.totalQty)+' وحدة',
+        p.matCost?`<span class="text-blue fw7">${fmt(p.matCost)} ج.م</span>`:'—',
+        p.cmoCost?`<span class="text-amber fw7">${fmt(p.cmoCost)} ج.م</span>`:'—',
+        `<span class="text-red fw7">${fmt(p.total)} ج.م</span>`,
+        p.unitCost?`<span class="fw7">${fmt(p.unitCost)} ج.م</span>`:'—',
+        p.sell?`<span class="text-green fw7">${fmt(p.sell)} ج.م</span>`:'—',
+        p.sell&&p.unitCost?`<span class="${p.margin>=0.2?'text-green':p.margin>=0.05?'text-amber':'text-red'} fw7">${(p.margin*100).toFixed(1)}%</span>`:'—',
+        `<span class="${p.yieldRate>=0.8?'text-green':'text-amber'} fw7">${(p.yieldRate*100).toFixed(0)}%</span>`,
+        p.margin>=0.2?'<span class="badge b-green">ممتاز</span>':p.margin>=0.05?'<span class="badge b-amber">مقبول</span>':'<span class="badge b-red">خسارة</span>'
+      )):[tr('<span class="text-muted">أضف أوامر إنتاج ومواد لتظهر التكاليف</span>')]
+    )}
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>🧪 المواد المستخدمة فعلياً (من الفواتير)</h2></div>
+    ${(()=>{
+      const matSummary={};
+      batchM.reduce((acc,b)=>{
+        const mat=getById('materials',b.materialId);if(!mat)return acc;
+        if(!acc[mat.name])acc[mat.name]={name:mat.name,type:mat.materialType,unit:mat.unit,qty:0,cost:0,invoices:new Set()};
+        acc[mat.name].qty+=Number(b.quantity||0);
+        acc[mat.name].cost+=Number(b.quantity||0)*Number(b.unitCostAtTime||0);
+        if(b.invoiceNumber)acc[mat.name].invoices.add(b.invoiceNumber);
+        return acc;
+      },{});
+      const rows=Object.values(getAll('batchMaterials').reduce((acc,b)=>{
+        const mat=getById('materials',b.materialId);if(!mat)return acc;
+        if(!acc[mat.name])acc[mat.name]={name:mat.name,type:mat.materialType,unit:mat.unit||'',qty:0,cost:0,invoices:new Set()};
+        acc[mat.name].qty+=Number(b.quantity||0);
+        acc[mat.name].cost+=Number(b.quantity||0)*Number(b.unitCostAtTime||0);
+        if(b.invoiceNumber)acc[mat.name].invoices.add(b.invoiceNumber);
+        return acc;
+      },{}));
+      if(!rows.length)return '<div class="empty">لا توجد مواد مرتبطة بتشغيلات</div>';
+      return tbl(['المادة','النوع','الكمية المستخدمة','الوحدة','التكلفة الكلية','متوسط سعر الوحدة','عدد الفواتير'],
+        rows.sort((a,b)=>b.cost-a.cost).map(m=>tr(
+          `<strong>${m.name}</strong>`,badge(m.type),fmtN(m.qty),m.unit,
+          `<span class="text-red fw7">${fmt(m.cost)} ج.م</span>`,
+          m.qty?fmt(m.cost/m.qty)+' ج.م':'—',m.invoices.size
+        )));
+    })()}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 5. EXPENSES ANALYSIS
+// ════════════════════════════════════════════════════════════════
+function reportExpenses(F){
+  const exps=getAll('expenses');
+  const months=Object.keys(F.expByMonth).sort();
+  const lastMonth=months[months.length-1];
+  const prevMonth=months[months.length-2];
+  const momChange=prevMonth?((F.expByMonth[lastMonth]||0)-(F.expByMonth[prevMonth]||0))/(F.expByMonth[prevMonth]||1):0;
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي المصروفات',F.totalOpExp,'','text-red','🧾')}
+    ${kpiCard('مصروفات مباشرة',F.directExp,exps.filter(e=>e.expenseType==='direct').length+' بند','text-blue','📋')}
+    ${kpiCard('مصروفات غير مباشرة',F.indirectExp,exps.filter(e=>e.expenseType==='indirect').length+' بند','text-purple','📋')}
+    <div class="stat-card">
+      <div class="lbl">📅 التغير الشهري (MoM)</div>
+      <div class="val ${momChange<=0?'text-green':'text-red'}" style="font-size:18px">${(momChange*100).toFixed(1)}%</div>
+      <div class="sub">${momChange<=0?'انخفاض ✅':'ارتفاع ⚠️'}</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📊 حسب الفئة</h2>
+      ${Object.entries(F.expByCat).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>{
+        const pct=F.totalOpExp>0?amt/F.totalOpExp:0;
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px">
+            <span>${cat}</span><span class="fw7">${fmt(amt)} ج.م (${(pct*100).toFixed(1)}%)</span>
+          </div>
+          <div style="height:5px;background:rgba(255,255,255,.08);border-radius:3px">
+            <div style="height:100%;width:${pct*100}%;background:var(--blue);border-radius:3px"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">🏢 حسب القسم</h2>
+      ${Object.entries(F.expByDept).sort((a,b)=>b[1]-a[1]).map(([dept,amt])=>`
+        <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px">
+          <span>${dept}</span>
+          <span class="text-red fw7">${fmt(amt)} ج.م</span>
+        </div>`).join('')}
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📅 المصروفات الشهرية</h2>
+      ${Object.entries(F.expByMonth).sort().map(([m,v])=>{
+        const max=Math.max(...Object.values(F.expByMonth));
+        const avg=Object.values(F.expByMonth).reduce((s,x)=>s+x,0)/Object.values(F.expByMonth).length;
+        const isHigh=v>avg*1.2;
+        return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11px">
+          <span style="min-width:80px;color:var(--muted)">${m}</span>
+          <div style="flex:1;height:5px;background:rgba(255,255,255,.08);border-radius:3px">
+            <div style="height:100%;width:${max>0?v/max*100:0}%;background:${isHigh?'var(--red)':'var(--blue)'};border-radius:3px"></div>
+          </div>
+          <span class="${isHigh?'text-red':'text-muted'} fw7" style="min-width:100px;text-align:left">${fmt(v)} ج.م</span>
+        </div>`;
+      }).join('')}
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)">
+        متوسط شهري: <strong>${fmt(Object.values(F.expByMonth).reduce((s,v)=>s+v,0)/Math.max(Object.values(F.expByMonth).length,1))} ج.م</strong>
+      </div>
+    </div>
+
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">🏆 أكبر 10 مصروفات</h2>
+      ${F.top10Exp.map((e,i)=>`
+        <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
+          <span style="display:flex;gap:6px">
+            <span style="color:var(--muted);min-width:18px">${i+1}.</span>
+            <span>${e.description?.slice(0,30)||'—'}</span>
+          </span>
+          <span class="text-red fw7">${fmt(e.amount)} ج.م</span>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 6. BUDGET vs ACTUAL
+// ════════════════════════════════════════════════════════════════
+function reportBudget(F){
+  const exps=getAll('expenses');
+  const totalActual=exps.reduce((s,e)=>s+Number(e.amount||0),0);
+  const variance=F.totalBudget-totalActual;
+  const ytdBudget=F.totalBudget;
+  const remaining=Math.max(0,F.totalBudget-totalActual);
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي الميزانية السنوية',ytdBudget,'','text-blue','📋')}
+    ${kpiCard('الإنفاق الفعلي',totalActual,'','text-red','💸')}
+    ${kpiCard('الميزانية المتبقية',remaining,'','text-green','💰')}
+    <div class="stat-card">
+      <div class="lbl">📊 نسبة الاستهلاك الكلية</div>
+      <div class="val ${F.totalBudget>0&&totalActual/F.totalBudget<=1?'text-green':'text-red'}" style="font-size:18px">
+        ${F.totalBudget>0?(totalActual/F.totalBudget*100).toFixed(1)+'%':'—'}
+      </div>
+      <div class="sub">${variance>=0?'✅ في الحدود':'⚠️ تجاوز الميزانية'}</div>
+    </div>
+  </div>
+
+  <div class="card" style="padding:20px;margin-bottom:16px">
+    <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📊 شريط تقدم الميزانية الكلية</h2>
+    <div style="background:rgba(255,255,255,.06);border-radius:8px;height:24px;overflow:hidden;margin-bottom:8px">
+      <div style="height:100%;width:${Math.min(F.totalBudget>0?totalActual/F.totalBudget*100:0,100)}%;background:${totalActual>F.totalBudget?'var(--red)':totalActual>F.totalBudget*0.8?'var(--amber)':'var(--green)'};border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff">
+        ${F.totalBudget>0?(totalActual/F.totalBudget*100).toFixed(1):'0'}%
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted)">
+      <span>0</span><span>مُنفق: ${fmt(totalActual)} ج.م</span><span>الميزانية: ${fmt(F.totalBudget)} ج.م</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📋 بند بند — الميزانية مقابل الفعلي</h2></div>
+    ${tbl(['الفئة','القسم','السنة','المخطط (ج.م)','الفعلي (ج.م)','الفرق (ج.م)','المتبقي (ج.م)','نسبة الاستهلاك','الحالة'],
+      F.budgets.map(b=>{
+        const actual=exps.filter(e=>e.category===b.category).reduce((s,e)=>s+Number(e.amount||0),0);
+        const budget=Number(b.budgetedAmount||0);
+        const diff=budget-actual;
+        const pct=budget>0?actual/budget:0;
+        const over=pct>1,warn=pct>0.8;
+        return tr(
+          `<strong>${b.category}</strong>`,b.department||'عام',b.year,
+          `<span class="text-blue fw7">${fmt(budget)} ج.م</span>`,
+          `<span class="text-red fw7">${fmt(actual)} ج.م</span>`,
+          `<span class="${diff>=0?'text-green':'text-red'} fw7">${diff>=0?'+':''}${fmt(diff)} ج.م</span>`,
+          `<span class="${diff>=0?'text-green':'text-muted'}">${fmt(Math.max(0,diff))} ج.م</span>`,
+          `<div style="display:flex;align-items:center;gap:6px">
+            <div style="flex:1;height:5px;background:rgba(255,255,255,.08);border-radius:3px">
+              <div style="height:100%;width:${Math.min(pct*100,100)}%;background:${over?'var(--red)':warn?'var(--amber)':'var(--green-light)'};border-radius:3px"></div>
+            </div>
+            <span class="${over?'text-red':warn?'text-amber':'text-green'} fw7" style="font-size:11px;min-width:36px">${(pct*100).toFixed(0)}%</span>
+          </div>`,
+          over?'<span class="badge b-red">تجاوز</span>':warn?'<span class="badge b-amber">تنبيه</span>':'<span class="badge b-green">جيد</span>'
+        );
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 7. INVENTORY REPORT
+// ════════════════════════════════════════════════════════════════
+function reportInventory(F){
+  const inv=getAll('inventory'),mats=getAll('materials'),now=new Date();
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('قيمة المنتجات النهائية',F.finishedInvVal,inv.length+' صنف','text-blue','📦')}
+    ${kpiCard('قيمة المواد الخام',F.rawMatVal,mats.length+' مادة','text-purple','🧪')}
+    ${kpiCard('إجمالي قيمة المخزون',F.totalInvVal,'','text-green','💰')}
+    ${kpiCard('قيمة المخزون منتهي الصلاحية',F.expiredVal,F.expiredInv.length+' صنف','text-red','⚠️')}
+  </div>
+  <div class="stats-grid g3" style="margin-bottom:16px">
+    <div class="stat-card">
+      <div class="lbl">🔄 معدل دوران المخزون</div>
+      <div class="val ${F.invTurnover>=4?'text-green':F.invTurnover>=2?'text-amber':'text-red'}" style="font-size:18px">${F.invTurnover.toFixed(2)}x</div>
+      <div class="sub">تكلفة المبيعات / متوسط المخزون</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">📅 أيام المخزون (DIO)</div>
+      <div class="val ${F.daysInv<=30?'text-green':F.daysInv<=60?'text-amber':'text-red'}" style="font-size:18px">${F.daysInv>0?F.daysInv.toFixed(0)+' يوم':'—'}</div>
+      <div class="sub">365 / معدل الدوران</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">⚠️ مواد تحت حد إعادة الطلب</div>
+      <div class="val text-amber" style="font-size:18px">${mats.filter(m=>m.reorderLevel&&Number(m.currentStock||0)<=Number(m.reorderLevel)).length}</div>
+      <div class="sub">تحتاج طلب فوري</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card">
+      <div class="card-head"><h2>📦 المنتجات النهائية</h2></div>
+      ${tbl(['المنتج','الكمية','تكلفة الوحدة','القيمة','الصلاحية','الأيام','حالة'],
+        inv.map(i=>{
+          const p=getById('products',i.productId);
+          const days=i.expiryDate?Math.floor((new Date(i.expiryDate)-now)/86400000):null;
+          const cls=days===null?'':days<0?'text-red fw7':days<90?'text-amber fw7':'text-green';
+          return tr(`<strong>${p?.name||'—'}</strong>`,fmtN(i.quantity),
+            i.unitCost?fmt(i.unitCost)+' ج.م':'—',
+            `<span class="text-blue fw7">${fmt(Number(i.quantity||0)*Number(i.unitCost||0))} ج.م</span>`,
+            `<span class="${cls}">${i.expiryDate||'—'}</span>`,
+            days!==null?`<span class="${cls}">${days<0?'منتهي':days+' يوم'}</span>`:'—',
+            days!==null?(days<0?'<span class="badge b-red">منتهي</span>':days<90?'<span class="badge b-amber">تنبيه</span>':'<span class="badge b-green">جيد</span>'):'—');
+        })
+      )}
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>🧪 المواد الخام — نقطة إعادة الطلب</h2></div>
+      ${tbl(['المادة','المخزون','حد الطلب','القيمة','الحالة'],
+        mats.map(m=>{
+          const low=m.reorderLevel&&Number(m.currentStock||0)<=Number(m.reorderLevel);
+          const pct=m.reorderLevel?Number(m.currentStock||0)/Number(m.reorderLevel):1;
+          return tr(
+            `<strong>${m.name}</strong>`,
+            `<span class="${low?'text-red fw7':''}">${fmtN(m.currentStock||0)} ${m.unit}</span>`,
+            m.reorderLevel?fmtN(m.reorderLevel)+' '+m.unit:'—',
+            `<span class="text-blue">${fmt(Number(m.currentStock||0)*Number(m.unitCost||0))} ج.م</span>`,
+            `<div style="display:flex;align-items:center;gap:4px">
+              <div style="width:50px;height:4px;background:rgba(255,255,255,.08);border-radius:2px">
+                <div style="height:100%;width:${Math.min(pct*100,100)}%;background:${low?'var(--red)':'var(--green-light)'};border-radius:2px"></div>
+              </div>
+              ${low?'<span class="badge b-red">طلب فوري</span>':'<span class="badge b-green">كافي</span>'}
+            </div>`);
+        })
+      )}
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 8. SALES ANALYSIS
+// ════════════════════════════════════════════════════════════════
+function reportSales(F){
+  const dels=getAll('deliveryOrders');
+  const delivered=dels.filter(d=>d.status==='delivered');
+  const byMonth={};
+  delivered.forEach(d=>{const m=d.orderDate?d.orderDate.slice(0,7):'—';byMonth[m]=(byMonth[m]||0)+Number(d.totalAmount||0);});
+  const months=Object.keys(byMonth).sort();
+  const growthMoM=months.length>1?(byMonth[months[months.length-1]]-byMonth[months[months.length-2]])/(byMonth[months[months.length-2]]||1):0;
+  const avgOrderVal=delivered.length?F.totalRevenue/delivered.length:0;
+  const collRate=F.totalRevenue>0?F.totalRevenue/(F.totalRevenue+F.tradeReceivables):0;
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي المبيعات المسلّمة',F.totalRevenue,'','text-green','💰')}
+    ${kpiCard('مبيعات قيد التسليم',F.pendingRev,'','text-amber','⏳')}
+    ${kpiCard('متوسط قيمة الأمر',avgOrderVal,'لكل أمر توريد','text-blue','📋')}
+    <div class="stat-card">
+      <div class="lbl">📅 نمو المبيعات (MoM)</div>
+      <div class="val ${growthMoM>=0?'text-green':'text-red'}" style="font-size:18px">${(growthMoM*100).toFixed(1)}%</div>
+      <div class="sub">${growthMoM>=0?'📈 نمو':'📉 انخفاض'}</div>
+    </div>
+  </div>
+  <div class="stats-grid g3" style="margin-bottom:16px">
+    ${kpiCard('مبيعات vs الأهداف',F.targetTotal?(F.targetAchievement*100).toFixed(1)+'%':'—',fmt(F.totalRevenue)+' من '+fmt(F.targetTotal)+' ج.م',F.targetAchievement>=1?'text-green':'text-amber','🎯')}
+    ${kpiCard('معدل تحصيل الذمم',(collRate*100).toFixed(1)+'%','','text-blue','💳')}
+    ${kpiCard('المرتجعات',F.returnedVal,'','text-red','🔄')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">🏆 أكبر الموزعين</h2>
+      ${F.topDist.length?F.topDist.map(([name,amt],i)=>{
+        const pct=F.totalRevenue>0?amt/F.totalRevenue:0;
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
+            <span>${i+1}. ${name}</span><span class="text-green fw7">${fmt(amt)} ج.م (${(pct*100).toFixed(1)}%)</span>
+          </div>
+          <div style="height:5px;background:rgba(255,255,255,.08);border-radius:3px">
+            <div style="height:100%;width:${pct*100}%;background:var(--green);border-radius:3px"></div>
+          </div>
+        </div>`;
+      }).join(''):'<div class="empty">لا توجد مبيعات</div>'}
+    </div>
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📦 المبيعات حسب المنتج</h2>
+      ${Object.entries(F.salesByProduct).sort((a,b)=>b[1].amount-a[1].amount).slice(0,8).map(([name,data])=>{
+        const pct=F.totalRevenue>0?data.amount/F.totalRevenue:0;
+        return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
+          <span>${name.slice(0,25)}</span>
+          <span class="text-green fw7">${fmt(data.amount)} ج.م</span>
+        </div>`;
+      }).join('')||'<div class="empty">أضف بنود أوامر التوريد لتظهر هنا</div>'}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📅 المبيعات الشهرية</h2></div>
+    ${tbl(['الشهر','المبيعات (ج.م)','عدد الأوامر','متوسط الأمر','نسبة من الإجمالي','اتجاه'],
+      months.map((m,i)=>{
+        const v=byMonth[m];
+        const prev=i>0?byMonth[months[i-1]]:null;
+        const chg=prev?(v-prev)/prev:null;
+        const ordCount=delivered.filter(d=>d.orderDate?.startsWith(m)).length;
+        const avg=ordCount?v/ordCount:0;
+        return tr(
+          m,`<span class="text-green fw7">${fmt(v)} ج.م</span>`,ordCount,
+          avg?fmt(avg)+' ج.م':'—',
+          F.totalRevenue>0?(v/F.totalRevenue*100).toFixed(1)+'%':'—',
+          chg!==null?`<span class="${chg>=0?'text-green':'text-red'}">${chg>=0?'📈':'📉'} ${(Math.abs(chg)*100).toFixed(1)}%</span>`:'—'
+        );
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 9. AR/AP AGING
+// ════════════════════════════════════════════════════════════════
+function reportAging(F){
+  const arTotal=Object.values(F.arAging).reduce((s,v)=>s+v,0);
+  const apTotal=Object.values(F.apAging).reduce((s,v)=>s+v,0);
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي الذمم المدينة (AR)',arTotal,'مستحقة من الموزعين','text-blue','💳')}
+    ${kpiCard('متأخرة +90 يوم',F.arAging.over90,'خطر عدم التحصيل','text-red','⚠️')}
+    ${kpiCard('إجمالي الذمم الدائنة (AP)',apTotal,'مستحقة للموردين','text-amber','📦')}
+    <div class="stat-card">
+      <div class="lbl">📊 صافي الموقف</div>
+      <div class="val ${arTotal>=apTotal?'text-green':'text-red'}" style="font-size:18px">${fmt(arTotal-apTotal)} ج.م</div>
+      <div class="sub">${arTotal>=apTotal?'✅ مدين صافي':'⚠️ دائن صافي'}</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--blue);font-size:15px;font-weight:700;margin-bottom:16px">💳 تقادم الذمم المدينة (AR Aging)</h2>
+      ${agingTable(F.arAging,'توزيع الذمم المدينة','text-blue')}
+      <div style="margin-top:16px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">تفاصيل الذمم المدينة</div>
+        ${tbl(['الموزع','المبلغ','تاريخ الاستحقاق','الأيام المتأخرة','الحالة'],
+          getAll('receivables').filter(r=>r.status!=='محصّل').sort((a,b)=>{
+            const da=a.dueDate?Math.floor((new Date()-new Date(a.dueDate))/86400000):0;
+            const db=b.dueDate?Math.floor((new Date()-new Date(b.dueDate))/86400000):0;
+            return db-da;
+          }).map(r=>{
+            const days=r.dueDate?Math.floor((new Date()-new Date(r.dueDate))/86400000):0;
+            const d=getById('distributors',r.distributorId);
+            return tr(
+              d?.name||r.distributorName||'—',
+              `<span class="${days>90?'text-red fw7':'text-blue'}">${fmt(r.amount)} ج.م</span>`,
+              r.dueDate||'—',
+              days>0?`<span class="${days>90?'text-red fw7':days>60?'text-amber':'text-muted'}">${days} يوم</span>`:'جارية',
+              badge(r.status==='محصّل'?'received':r.status==='متأخر'?'expired':'pending')
+            );
+          })
+        )}
+      </div>
+    </div>
+
+    <div class="card" style="padding:24px">
+      <h2 style="color:var(--amber);font-size:15px;font-weight:700;margin-bottom:16px">📦 تقادم الذمم الدائنة (AP Aging)</h2>
+      ${agingTable(F.apAging,'توزيع الذمم الدائنة','text-amber')}
+      <div style="margin-top:16px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">مشتريات معلقة</div>
+        ${tbl(['المورد','المادة','المبلغ','تاريخ الطلب','الأيام'],
+          getAll('purchaseOrders').filter(p=>p.status==='معلق').sort((a,b)=>new Date(a.orderDate||0)-new Date(b.orderDate||0)).map(p=>{
+            const days=p.orderDate?Math.floor((new Date()-new Date(p.orderDate))/86400000):0;
+            return tr(p.supplier||'—',p.materialName||'—',
+              `<span class="text-amber fw7">${fmt(p.totalAmount||0)} ج.م</span>`,
+              p.orderDate||'—',
+              `<span class="${days>30?'text-red':'text-muted'}">${days} يوم</span>`);
+          })
+        )}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 10. FIXED ASSETS & DEPRECIATION
+// ════════════════════════════════════════════════════════════════
+function reportAssets(F){
+  const assets=getAll('assets');
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي تكلفة الأصول',F.grossFixedAssets,'','text-blue','🏗️')}
+    ${kpiCard('مجمع الإهلاك',F.accDepreciation,'','text-red','📉')}
+    ${kpiCard('صافي القيمة الدفترية',F.netFixedAssets,'','text-green','💰')}
+    ${kpiCard('الإهلاك السنوي',F.annualDepreciation,'مصروف الإهلاك','text-amber','📊')}
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-head"><h2>🏗️ جدول الأصول الثابتة والإهلاك</h2></div>
+    ${tbl(['اسم الأصل','الفئة','تاريخ الشراء','التكلفة','العمر الإنتاجي','معدل الإهلاك%',
+           'إهلاك سنوي','مجمع الإهلاك','صافي القيمة الدفترية','الحالة'],
+      assets.map(a=>{
+        const annDep=Number(a.usefulLife||0)>0?Number(a.purchaseCost||0)/Number(a.usefulLife):0;
+        const netVal=Number(a.purchaseCost||0)-Number(a.accDepreciation||0);
+        const depPct=Number(a.depRate||0)||(Number(a.usefulLife||0)>0?100/Number(a.usefulLife):0);
+        return tr(
+          `<strong>${a.name}</strong>`,a.category||'—',a.purchaseDate||'—',
+          `<span class="text-blue fw7">${fmt(a.purchaseCost||0)} ج.م</span>`,
+          a.usefulLife?a.usefulLife+' سنة':'—',
+          depPct.toFixed(1)+'%',
+          `<span class="text-amber">${fmt(annDep)} ج.م</span>`,
+          `<span class="text-red">${fmt(a.accDepreciation||0)} ج.م</span>`,
+          `<span class="${netVal>0?'text-green fw7':'text-red fw7'}">${fmt(netVal)} ج.م</span>`,
+          badge(a.status==='active'?'active':a.status==='disposed'?'cancelled':'inactive')
+        );
+      })
+    )}
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>📊 الأصول حسب الفئة</h2></div>
+    ${tbl(['الفئة','عدد الأصول','إجمالي التكلفة','مجمع الإهلاك','صافي القيمة الدفترية','نسبة الإهلاك %'],
+      Object.entries(F.assetsByCategory).map(([cat,data])=>tr(
+        `<strong>${cat}</strong>`,data.count,
+        `<span class="text-blue fw7">${fmt(data.cost)} ج.م</span>`,
+        `<span class="text-red">${fmt(data.dep)} ج.م</span>`,
+        `<span class="text-green fw7">${fmt(data.net)} ج.م</span>`,
+        `<span class="${data.cost>0&&data.dep/data.cost>0.7?'text-red':data.dep/data.cost>0.4?'text-amber':'text-green'}">${data.cost>0?(data.dep/data.cost*100).toFixed(1)+'%':'—'}</span>`
+      ))
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 11. EMPLOYEES REPORT
+// ════════════════════════════════════════════════════════════════
+function reportEmployees(F){
+  const emps=getAll('employees');
+  const active=emps.filter(e=>e.status==='active');
+  const payroll=getAll('payrollRuns');
+  const totalPaidPayroll=payroll.reduce((s,r)=>s+Number(r.totalAmount||0),0);
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('الموظفون النشطون',F.empCount+' موظف','','text-blue','👥')}
+    ${kpiCard('الرواتب الشهرية',F.totalMonthlySalary,'','text-red','💼')}
+    ${kpiCard('الرواتب السنوية',F.totalMonthlySalary*12,'','text-purple','📊')}
+    ${kpiCard('إجمالي الرواتب المصروفة',totalPaidPayroll,payroll.length+' دفعة','text-amber','💸')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">🏢 التوزيع حسب القسم</h2>
+      ${Object.entries(F.byDept).sort((a,b)=>b[1].salary-a[1].salary).map(([dept,data])=>`
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
+          <span><strong>${dept}</strong> <span style="color:var(--muted)">(${data.count} موظف)</span></span>
+          <span class="text-red fw7">${fmt(data.salary)} ج.م/شهر</span>
+        </div>`).join('')}
+    </div>
+    <div class="card" style="padding:20px">
+      <h2 style="font-size:14px;font-weight:700;margin-bottom:12px">📅 سجل صرف الرواتب</h2>
+      ${payroll.length?tbl(['الشهر','السنة','الموظفون','الإجمالي','تاريخ الصرف'],
+        payroll.slice(-6).reverse().map(r=>tr(
+          MONTHS[(r.month||1)-1]||r.month,r.year,r.employeeCount,
+          `<span class="text-green fw7">${fmt(r.totalAmount)} ج.م</span>`,r.payDate||'—'
+        ))
+      ):'<div class="empty">لا يوجد سجل صرف رواتب</div>'}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>👥 كشف رواتب الموظفين</h2></div>
+    ${tbl(['الاسم','القسم','المنصب','الراتب الأساسي','البدلات','الخصومات','صافي الراتب','تاريخ التعيين'],
+      active.sort((a,b)=>Number(b.salary||0)-Number(a.salary||0)).map(e=>{
+        const net=Number(e.salary||0)+Number(e.allowances||0)-Number(e.deductions||0);
+        return tr(
+          `<strong>${e.name}</strong>`,e.department,e.position,
+          fmt(e.salary||0)+' ج.م',
+          Number(e.allowances||0)?`<span class="text-green">${fmt(e.allowances)} ج.م</span>`:'—',
+          Number(e.deductions||0)?`<span class="text-red">${fmt(e.deductions)} ج.م</span>`:'—',
+          `<span class="fw7">${fmt(net)} ج.م</span>`,e.hireDate||'—'
+        );
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 12. TAX & VAT REPORT
+// ════════════════════════════════════════════════════════════════
+function reportTax(F){
+  const taxPaid=getAll('taxLines').filter(t=>t.status==='مدفوع').reduce((s,t)=>s+Number(t.amount||0),0);
+  const now=new Date();
+  const overdue=getAll('taxLines').filter(t=>t.status==='معلق'&&t.dueDate&&new Date(t.dueDate)<now);
+
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('ضريبة المبيعات (مخرجات)',F.vatOut,'VAT على المبيعات','text-red','🧾')}
+    ${kpiCard('ضريبة المشتريات (مدخلات)',F.vatIn,'VAT قابل للخصم','text-green','🧾')}
+    ${kpiCard('صافي VAT المستحق',F.netVat,F.netVat>=0?'مستحق للسداد':'رصيد دائن',F.netVat>=0?'text-red':'text-green','💰')}
+    ${kpiCard('ضرائب متأخرة السداد',overdue.reduce((s,t)=>s+Number(t.amount||0),0),overdue.length+' بند','text-amber','⚠️')}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card" style="padding:24px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">📋 ملخص إقرار VAT</h2>
+      ${plRow('ضريبة المبيعات (مخرجات)', F.vatOut,'text-red')}
+      ${plRow('(ضريبة المشتريات — مدخلات)', -F.vatIn,'text-green')}
+      <div style="border-top:2px solid ${F.netVat>=0?'var(--red)':'var(--green)'};margin-top:8px;padding-top:8px">
+        ${plRow(F.netVat>=0?'الضريبة المستحقة للسداد':'رصيد ضريبي دائن',F.netVat,F.netVat>=0?'text-red fw7':'text-green fw7',0,true)}
+      </div>
+      <div style="margin-top:12px;padding:10px;background:rgba(56,139,253,.06);border-radius:8px;font-size:11px;color:var(--muted)">
+        💡 يُقدَّم الإقرار الضريبي شهرياً على بوابة هيئة الضرائب المصرية (eta.gov.eg)
+      </div>
+
+      <div style="margin-top:14px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">📊 VAT الشهري</div>
+        ${(()=>{
+          const dels=getAll('deliveryOrders').filter(d=>d.status==='delivered');
+          const byMonth={};
+          dels.forEach(d=>{const m=d.orderDate?d.orderDate.slice(0,7):'—';byMonth[m]=(byMonth[m]||0)+Number(d.vatAmount||0);});
+          return Object.entries(byMonth).sort().map(([m,v])=>`
+            <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
+              <span>${m}</span><span class="text-red fw7">${fmt(v)} ج.م</span>
+            </div>`).join('');
+        })()}
+      </div>
+    </div>
+
+    <div class="card" style="padding:24px">
+      <h2 style="font-size:15px;font-weight:700;margin-bottom:14px">🏦 الالتزامات الضريبية الكاملة</h2>
+      ${plRow('ضريبة الدخل المدفوعة', taxPaid,'text-red')}
+      ${plRow('ضريبة قيمة مضافة مستحقة', F.vatLiab,'text-red')}
+      ${plRow('ضرائب أخرى معلقة', F.taxLiab,'text-amber')}
+      <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px">
+        ${plRow('إجمالي الالتزامات الضريبية', F.vatLiab+F.taxLiab+taxPaid,'text-red fw7',0,true)}
+      </div>
+
+      ${overdue.length?`<div style="margin-top:14px;padding:10px;background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.2);border-radius:8px">
+        <div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px">⚠️ ضرائب متأخرة السداد</div>
+        ${overdue.map(t=>`<div style="font-size:11px;padding:3px 0">${t.description} — ${fmt(t.amount)} ج.م — استحقت: ${t.dueDate||'—'}</div>`).join('')}
+      </div>`:''}
+
+      <div style="margin-top:14px">
+        ${tbl(['نوع الضريبة','المبلغ','الفترة','الاستحقاق','الحالة'],
+          F.taxL.map(t=>tr(
+            {income:'ضريبة دخل',vat:'ضريبة قيمة مضافة',stamp:'ضريبة دمغة',withholding:'خصم وإضافة',other:'أخرى'}[t.taxType]||t.taxType,
+            `<span class="text-red fw7">${fmt(t.amount)} ج.م</span>`,
+            t.period||'—',t.dueDate||'—',
+            badge(t.status==='مدفوع'?'received':t.status==='معلق'?'pending':'cancelled')
+          ))
+        )}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// 13. REGISTRATION REPORT
+// ════════════════════════════════════════════════════════════════
+function reportRegistration(F){
+  const now=new Date();
+  return `
+  <div class="stats-grid g4" style="margin-bottom:16px">
+    ${kpiCard('إجمالي المنتجات المسجلة',F.regs.length,'','text-blue','📑')}
+    ${kpiCard('تراخيص منتهية',F.expiredRegs.length,'','text-red','❌')}
+    ${kpiCard('تنتهي خلال 90 يوم',F.expiring90.length,'تحتاج تجديد','text-amber','⚠️')}
+    ${kpiCard('إجمالي رسوم التسجيل',F.totalRegFees,'','text-purple','💰')}
+  </div>
+
+  ${F.expiredRegs.length||F.expiring90.length?`
+  <div class="alert alert-warn" style="margin-bottom:16px">
+    ${ic.warn}
+    <div>
+      ${F.expiredRegs.length?`<strong>منتهية الصلاحية (${F.expiredRegs.length}):</strong> ${F.expiredRegs.map(r=>getById('products',r.productId)?.name||'').filter(Boolean).join(' • ')}<br>`:''}
+      ${F.expiring90.length?`<strong>تنتهي خلال 90 يوم (${F.expiring90.length}):</strong> ${F.expiring90.map(r=>getById('products',r.productId)?.name||'').filter(Boolean).join(' • ')}`:''}
+    </div>
+  </div>`:''}
+
+  <div class="card">
+    <div class="card-head"><h2>📑 سجل التراخيص الدوائية الكاملة</h2></div>
+    ${tbl(['المنتج','رقم التسجيل','تاريخ الإصدار','تاريخ الانتهاء','الأيام المتبقية','رسوم التسجيل','رسوم التجديد','الحالة'],
+      F.regs.map(r=>{
+        const p=getById('products',r.productId);
+        const days=r.expiryDate?Math.floor((new Date(r.expiryDate)-now)/86400000):null;
+        const isExp=days!==null&&days<0;
+        const isWarn=days!==null&&days>=0&&days<=90;
+        return tr(
+          `<strong>${p?.name||'—'}</strong>`,
+          r.registrationNumber?`<code>${r.registrationNumber}</code>`:'—',
+          r.issueDate||'—',
+          `<span class="${isExp?'text-red fw7':isWarn?'text-amber fw7':''}">${r.expiryDate||'—'}</span>`,
+          days!==null?`<span class="${isExp?'text-red fw7':isWarn?'text-amber fw7':'text-green'}">${isExp?'منتهي':days+' يوم'}</span>`:'—',
+          r.registrationFee?fmt(r.registrationFee)+' ج.م':'—',
+          r.renewalFee?fmt(r.renewalFee)+' ج.م':'—',
+          badge(isExp?'expired':isWarn?'pending':'active')
+        );
+      })
+    )}
+  </div>`;
+}
+
+// ════════════════════════════════════════════════════════════════
+// EXCEL EXPORT — كامل
+// ════════════════════════════════════════════════════════════════
+function exportFinancialExcel(){
+  if(typeof XLSX==='undefined'){alert('مكتبة Excel تحمّل، حاول مرة أخرى');return;}
+  const F=calcFinancials();
+  const wb=XLSX.utils.book_new();
+  const co=document.getElementById('logo-name')?.textContent||'الشركة';
+  const dt=new Date().toLocaleDateString('ar-EG');
+  const hdr=[[co+' — التقارير المالية الشاملة'],['تاريخ التقرير: '+dt],[]];
+
+  // 1. قائمة الدخل
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['قائمة الدخل — Income Statement'],['البيان','المبلغ (ج.م)'],
+    ['إيرادات المبيعات',F.totalRevenue],['(مردودات)',-(F.returnedVal)],['(خصم مسموح)',-(F.discountAmt)],
+    ['صافي الإيرادات',F.netRevenue],['إيرادات أخرى',F.otherIncome],['إجمالي الإيرادات',F.totalIncome],[],
+    ['تكلفة المواد الخام',-(F.prodMatCost)],['تكلفة CMO',-(F.cmoCost)],
+    ['تكاليف تغليف',-(F.packagingExp)],['تكاليف جودة QC',-(F.qcCost)],
+    ['عمالة مباشرة',-(F.directLabor)],['نقل المنتج',-(F.transportCost)],
+    ['إجمالي COGS',-(F.cogs)],['مجمل الربح',F.grossProfit],
+    ['هامش مجمل الربح %',(F.grossMargin*100).toFixed(2)+'%'],[],
+    ['مصروفات بيع وتسويق',-(F.sellExp)],['مصروفات عمومية وإدارية',-(F.adminExp)],
+    ['تسجيل دوائي',-(F.regExp)],['مصروفات مباشرة أخرى',-(F.directExp)],
+    ['مصروفات غير مباشرة',-(F.indirectExp)],['إهلاك الأصول',-(F.annualDepreciation)],
+    ['إجمالي المصروفات التشغيلية',-(F.totalOpExp+F.annualDepreciation)],[],
+    ['ربح التشغيل EBIT',F.ebit],['EBITDA',F.ebitda],
+    ['مصروفات تمويلية',-(F.financeExp)],['الربح قبل الضريبة EBT',F.ebt],
+    ['ضريبة الدخل',-(F.incomeTax)],['صافي الربح / الخسارة',F.netProfit],
+    ['هامش الربح الصافي %',(F.netMargin*100).toFixed(2)+'%'],
+  ]),'قائمة الدخل');
+
+  // 2. المركز المالي
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['المركز المالي — Balance Sheet'],['البيان','المبلغ (ج.م)'],
+    ['الأصول المتداولة'],['نقدية وما في حكمها',F.cashOnHand],
+    ['مخزون المنتجات النهائية',F.finishedInvVal],['مخزون المواد الخام',F.rawMatVal],
+    ['ذمم مدينة',F.tradeReceivables],['مبيعات معلقة',F.pendingDelivVal],
+    ['إجمالي الأصول المتداولة',F.totalCurrentAssets],[],
+    ['أصول ثابتة (التكلفة)',F.grossFixedAssets],['(مجمع الإهلاك)',-(F.accDepreciation)],
+    ['صافي الأصول الثابتة',F.netFixedAssets],['رسوم تسجيل (رسملة)',F.regFeesAsset],
+    ['إجمالي الأصول غير المتداولة',F.totalNonCurrentAssets],
+    ['إجمالي الأصول',F.totalAssets],[],
+    ['الالتزامات'],['ذمم دائنة',F.supplierDebt],['التزامات ضريبية',F.taxLiab],
+    ['VAT مستحق',F.vatLiab],['رواتب مستحقة',F.accruals],
+    ['إجمالي الالتزامات المتداولة',F.totalCurrentLiab],
+    ['قروض طويلة الأجل',F.longTermLoans],['إجمالي الالتزامات',F.totalLiab],[],
+    ['حقوق الملكية'],['رأس المال',F.paidCapital],
+    ['أرباح مرحلة',F.retainedEarnings],['صافي ربح الفترة',F.netProfit],
+    ['إجمالي حقوق الملكية',F.equity],
+    ['إجمالي الالتزامات وحقوق الملكية',F.totalLiab+F.equity],
+  ]),'المركز المالي');
+
+  // 3. التدفقات النقدية
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['التدفقات النقدية — Cash Flow Statement'],['البيان','المبلغ (ج.م)'],
+    ['أولاً: التدفقات التشغيلية'],['صافي الربح',F.netProfit],
+    ['إهلاك الأصول',F.annualDepreciation],['(تغير الذمم المدينة)',-(F.tradeReceivables)],
+    ['تغير الذمم الدائنة',F.supplierDebt],['صافي التدفق التشغيلي',F.cfOperating],[],
+    ['ثانياً: التدفقات الاستثمارية'],['(شراء أصول ثابتة)',-(F.grossFixedAssets)],
+    ['صافي التدفق الاستثماري',F.cfInvesting],[],
+    ['ثالثاً: التدفقات التمويلية'],['قروض وعقود',F.cfFinancing],
+    ['صافي التدفق التمويلي',F.cfFinancing],[],
+    ['صافي التغير في النقدية',F.netCashFlow],
+  ]),'التدفقات النقدية');
+
+  // 4. تكلفة الإنتاج
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تكلفة الإنتاج — COGS Analysis'],
+    ['رقم الأمر','المنتج','المصنع','الكمية','تكلفة المواد','تكلفة CMO','الإجمالي','تكلفة الوحدة','سعر البيع','هامش %','الحالة'],
+    ...getAll('productionOrders').map(o=>{
+      const p=getById('products',o.productId),c=getById('cmos',o.cmoId);
+      const bm=getAll('batchMaterials').filter(m=>m.productionOrderId===o.id);
+      const mc=bm.reduce((s,m)=>s+Number(m.quantity||0)*Number(m.unitCostAtTime||0),0);
+      const cc=Number(o.cmoBaseCost||0);const tot=mc+cc;const qty=Number(o.quantity||0);
+      const uc=qty?tot/qty:0;const sp=Number(p?.sellingPrice||0);
+      return [o.orderNumber||'PO-'+o.id,p?.name||'—',c?.name||'—',qty,mc,cc,tot,uc,sp,
+              sp?(((sp-uc)/sp)*100).toFixed(1)+'%':'—',o.status];
+    })
+  ]),'تكلفة الإنتاج');
+
+  // 5. المصروفات
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تحليل المصروفات'],['الوصف','النوع','الفئة','القسم','المبلغ','التاريخ'],
+    ...getAll('expenses').sort((a,b)=>Number(b.amount||0)-Number(a.amount||0)).map(e=>[
+      e.description,e.expenseType==='direct'?'مباشرة':'غير مباشرة',
+      e.category,e.department||'—',Number(e.amount||0),e.expenseDate||'—'])
+  ]),'المصروفات');
+
+  // 6. الميزانية
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['الميزانية مقابل الفعلي'],['الفئة','القسم','السنة','المخطط','الفعلي','الفرق','الاستهلاك %'],
+    ...getAll('budgetLines').map(b=>{
+      const act=getAll('expenses').filter(e=>e.category===b.category).reduce((s,e)=>s+Number(e.amount||0),0);
+      const bgt=Number(b.budgetedAmount||0);
+      return [b.category,b.department||'—',b.year,bgt,act,bgt-act,bgt>0?((act/bgt)*100).toFixed(1)+'%':'—'];
+    })
+  ]),'الميزانية');
+
+  // 7. المخزون
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تقرير المخزون الكامل'],
+    ['النوع','الصنف','الكمية','الوحدة','تكلفة الوحدة','إجمالي القيمة','تاريخ الانتهاء','الحالة'],
+    ...getAll('inventory').map(i=>{const p=getById('products',i.productId);const days=i.expiryDate?Math.floor((new Date()-new Date(i.expiryDate))/86400000):null;return ['منتج نهائي',p?.name||'—',Number(i.quantity||0),p?.unit||'—',Number(i.unitCost||0),Number(i.quantity||0)*Number(i.unitCost||0),i.expiryDate||'—',days>0?'منتهي':days>-90?'قريب':'جيد'];}),
+    ...getAll('materials').filter(m=>Number(m.currentStock||0)>0).map(m=>[{raw_material:'مادة خام',packaging:'مادة تغليف'}[m.materialType]||'مادة',m.name,Number(m.currentStock||0),m.unit,Number(m.unitCost||0),Number(m.currentStock||0)*Number(m.unitCost||0),'—',Number(m.currentStock||0)<=Number(m.reorderLevel||0)?'تحت الحد':'كافي']),
+  ]),'المخزون');
+
+  // 8. المبيعات
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تقرير المبيعات'],['رقم الأمر','الموزع','التاريخ','المبلغ','VAT','الإجمالي','الحالة'],
+    ...getAll('deliveryOrders').map(o=>{const d=getById('distributors',o.distributorId);const vat=Number(o.vatAmount||0);return [o.orderNumber||'DO-'+o.id,d?.name||'—',o.orderDate||'—',Number(o.totalAmount||0),vat,Number(o.totalAmount||0)+vat,o.status];})
+  ]),'المبيعات');
+
+  // 9. الذمم AR/AP
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تقرير الذمم المدينة والدائنة'],
+    ['الذمم المدينة (AR)'],['الموزع','المبلغ','تاريخ الاستحقاق','الأيام المتأخرة','الحالة'],
+    ...getAll('receivables').filter(r=>r.status!=='محصّل').map(r=>{const d=getById('distributors',r.distributorId);const days=r.dueDate?Math.floor((new Date()-new Date(r.dueDate))/86400000):0;return [d?.name||r.distributorName||'—',Number(r.amount||0),r.dueDate||'—',days>0?days:0,r.status];}),
+    [],[' الذمم الدائنة (AP)'],['المورد','المادة','المبلغ','تاريخ الطلب','الأيام'],
+    ...getAll('purchaseOrders').filter(p=>p.status==='معلق').map(p=>{const days=p.orderDate?Math.floor((new Date()-new Date(p.orderDate))/86400000):0;return [p.supplier||'—',p.materialName||'—',Number(p.totalAmount||0),p.orderDate||'—',days];})
+  ]),'الذمم AR-AP');
+
+  // 10. الأصول والإهلاك
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['الأصول الثابتة وجدول الإهلاك'],
+    ['الأصل','الفئة','تاريخ الشراء','التكلفة','العمر الإنتاجي (سنة)','معدل الإهلاك%','إهلاك سنوي','مجمع الإهلاك','صافي القيمة الدفترية','الحالة'],
+    ...getAll('assets').map(a=>{const ann=Number(a.usefulLife||0)>0?Number(a.purchaseCost||0)/Number(a.usefulLife):0;const net=Number(a.purchaseCost||0)-Number(a.accDepreciation||0);return [a.name,a.category||'—',a.purchaseDate||'—',Number(a.purchaseCost||0),Number(a.usefulLife||0),Number(a.depRate||0),ann,Number(a.accDepreciation||0),net,a.status];})
+  ]),'الأصول والإهلاك');
+
+  // 11. الموظفون
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['كشف الرواتب والموظفون'],
+    ['الاسم','القسم','المنصب','الراتب الأساسي','البدلات','الخصومات','صافي الراتب','تاريخ التعيين','الحالة'],
+    ...getAll('employees').map(e=>{const net=Number(e.salary||0)+Number(e.allowances||0)-Number(e.deductions||0);return [e.name,e.department,e.position,Number(e.salary||0),Number(e.allowances||0),Number(e.deductions||0),net,e.hireDate||'—',e.status];})
+  ]),'الموظفون');
+
+  // 12. الضرائب
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['تقرير الضرائب وVAT'],['البيان','المبلغ (ج.م)'],
+    ['ضريبة المبيعات (مخرجات)',F.vatOut],['ضريبة المشتريات (مدخلات)',F.vatIn],['صافي VAT',F.netVat],[],
+    ['نوع الضريبة','الوصف','المبلغ','الفترة','تاريخ الاستحقاق','الحالة'],
+    ...getAll('taxLines').map(t=>[{income:'دخل',vat:'VAT',stamp:'دمغة',withholding:'خصم وإضافة',other:'أخرى'}[t.taxType]||t.taxType,t.description,Number(t.amount||0),t.period||'—',t.dueDate||'—',t.status])
+  ]),'الضرائب وVAT');
+
+  // 13. التسجيل الدوائي
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['التسجيل الدوائي'],
+    ['المنتج','رقم التسجيل','تاريخ الإصدار','تاريخ الانتهاء','الأيام المتبقية','رسوم التسجيل','رسوم التجديد','الحالة'],
+    ...getAll('registrations').map(r=>{const p=getById('products',r.productId);const days=r.expiryDate?Math.floor((new Date(r.expiryDate)-new Date())/86400000):null;return [p?.name||'—',r.registrationNumber||'—',r.issueDate||'—',r.expiryDate||'—',days!==null?days:'—',Number(r.registrationFee||0),Number(r.renewalFee||0),days<0?'منتهي':days<=90?'قريب الانتهاء':'نشط'];})
+  ]),'التسجيل الدوائي');
+
+  // 14. الملخص التنفيذي
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([...hdr,
+    ['الملخص التنفيذي — Executive Summary'],['المؤشر','القيمة'],
+    ['إجمالي الإيرادات',F.totalRevenue],['صافي الإيرادات',F.netRevenue],
+    ['مجمل الربح',F.grossProfit],['هامش مجمل الربح %',(F.grossMargin*100).toFixed(2)+'%'],
+    ['ربح التشغيل EBIT',F.ebit],['EBITDA',F.ebitda],
+    ['إجمالي المصروفات',F.totalOpExp],['إهلاك الأصول',F.annualDepreciation],
+    ['صافي الربح / الخسارة',F.netProfit],['هامش الربح الصافي %',(F.netMargin*100).toFixed(2)+'%'],[],
+    ['إجمالي الأصول',F.totalAssets],['إجمالي الالتزامات',F.totalLiab],
+    ['صافي حقوق الملكية',F.equity],[],
+    ['قيمة المخزون',F.totalInvVal],['معدل دوران المخزون',F.invTurnover.toFixed(2)+'x'],
+    ['أيام المخزون',F.daysInv.toFixed(0)+' يوم'],[],
+    ['صافي التدفق النقدي',F.netCashFlow],
+    ['صافي VAT المستحق',F.netVat],[],
+    ['عدد الموظفين النشطين',F.empCount],['الرواتب الشهرية',F.totalMonthlySalary],
+    ['إجمالي رسوم التسجيل الدوائي',F.totalRegFees],
+  ]),'الملخص التنفيذي');
+
+  XLSX.writeFile(wb,`${co}-Financial-${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
 // renderNav/go called by coEnter() after company is selected
 </script>
 
