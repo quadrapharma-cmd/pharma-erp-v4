@@ -8167,6 +8167,302 @@ function importBackup(input) {
 })();
 
 
+// ════════════════════════════════════════════════════════════════
+// GITHUB REPO CLOUD DATABASE
+// بيخزن البيانات في GitHub repo خاص — مجاني تماماً
+// ════════════════════════════════════════════════════════════════
+
+// Cloud config — loaded from localStorage (set via settings panel)
+const CLOUD_CONFIG = (()=>{
+  const saved = JSON.parse(localStorage.getItem('_pharma_cloud_cfg')||'{}');
+  return {
+    token:  saved.token  || '',
+    user:   saved.user   || 'quadrapharma-cmd',
+    repo:   saved.repo   || 'pharma-erp-cloud-db',
+    file:   'db.json',
+    branch: 'main'
+  };
+})();
+
+let _cloudSHA        = null;
+let _cloudEnabled    = true;
+let _syncTimer       = null;
+let _lastSyncTime    = null;
+let _syncInProgress  = false;
+let _localChanges    = false;
+
+// ── API helper ───────────────────────────────────────────────
+async function ghAPI(method, path, body){
+  const r = await fetch(`https://api.github.com/repos/${CLOUD_CONFIG.user}/${CLOUD_CONFIG.repo}/${path}`, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${CLOUD_CONFIG.token}`,
+      'Accept':        'application/vnd.github+json',
+      'Content-Type':  'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return r.json();
+}
+
+// ── Pull from Cloud ───────────────────────────────────────────
+async function pullFromCloud(){
+  if(!_cloudEnabled || _syncInProgress) return false;
+  try {
+    setSyncStatus('syncing');
+    const data = await ghAPI('GET', `contents/${CLOUD_CONFIG.file}`);
+    if(!data.sha) throw new Error('No file found');
+
+    _cloudSHA = data.sha;
+    const decoded = JSON.parse(atob(data.content.replace(/\n/g,'')));
+
+    // Merge cloud into local DB (cloud wins if newer)
+    const cloudTime  = new Date(decoded._updated||0);
+    const localTime  = new Date(localStorage.getItem('_pharma_last_push')||0);
+
+    if(cloudTime > localTime){
+      // Cloud is newer — load it
+      Object.keys(decoded).forEach(k => {
+        if(k !== '_v' && k !== '_updated' && k !== '_device') DB[k] = decoded[k];
+      });
+      try{ localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }catch(e){}
+      setSyncStatus('synced', decoded._updated);
+      return 'cloud';
+    } else {
+      setSyncStatus('synced', _lastSyncTime);
+      return 'local';
+    }
+  } catch(e){
+    console.warn('Pull failed:', e.message);
+    setSyncStatus('error');
+    return false;
+  }
+}
+
+// ── Push to Cloud ─────────────────────────────────────────────
+async function pushToCloud(){
+  if(!_cloudEnabled || _syncInProgress) return;
+  _syncInProgress = true;
+  setSyncStatus('syncing');
+
+  try {
+    // Get latest SHA first (avoid conflicts)
+    if(!_cloudSHA){
+      const info = await ghAPI('GET', `contents/${CLOUD_CONFIG.file}`);
+      _cloudSHA  = info.sha;
+    }
+
+    const now     = new Date().toISOString();
+    const payload = { ...DB, _v:1, _updated:now, _device: navigator.userAgent.slice(0,50) };
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+
+    const result = await ghAPI('PUT', `contents/${CLOUD_CONFIG.file}`, {
+      message: `ERP sync ${now.slice(0,19)}`,
+      content,
+      sha: _cloudSHA
+    });
+
+    if(result.content?.sha){
+      _cloudSHA     = result.content.sha;
+      _lastSyncTime = now;
+      _localChanges = false;
+      localStorage.setItem('_pharma_last_push', now);
+      setSyncStatus('synced', now);
+    } else {
+      // SHA conflict — pull first then push
+      _cloudSHA = null;
+      await pullFromCloud();
+      _syncInProgress = false;
+      await pushToCloud();
+    }
+  } catch(e){
+    console.error('Push failed:', e);
+    setSyncStatus('error');
+  } finally {
+    _syncInProgress = false;
+  }
+}
+
+// ── Debounced auto-save ───────────────────────────────────────
+const _origSaveDB = saveDB;
+function saveDB(){
+  _origSaveDB(); // save locally first always
+  _localChanges = true;
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(pushToCloud, 3000); // push after 3s of no changes
+}
+
+// ── Status indicator ─────────────────────────────────────────
+function setSyncStatus(status, time){
+  const el = document.getElementById('sync-status');
+  if(!el) return;
+  const s = {
+    synced:  {icon:'☁️✅', txt:'محفوظ',       col:'var(--green-light)'},
+    syncing: {icon:'🔄',   txt:'مزامنة...',    col:'var(--amber)'},
+    error:   {icon:'⚠️',   txt:'خطأ اتصال',    col:'var(--red)'},
+    offline: {icon:'💾',   txt:'محلي فقط',     col:'var(--muted)'},
+  }[status]||{icon:'☁️',txt:'',col:'var(--muted)'};
+
+  const t = time ? ' '+new Date(time).toLocaleTimeString('ar-EG',{hour:'2-digit',minute:'2-digit'}) : '';
+  el.innerHTML  = `${s.icon} <span style="font-size:11px;color:${s.col}">${s.txt}${t}</span>`;
+  el.title      = `آخر مزامنة: ${time||'—'}`;
+  el.onclick    = ()=> showSyncPanel();
+}
+
+// ── Sync panel ────────────────────────────────────────────────
+function showSyncPanel(){
+  const cfg = JSON.parse(localStorage.getItem('_pharma_cloud_cfg')||'{}');
+  const isConfigured = !!cfg.token;
+
+  if(!isConfigured){
+    // Show setup panel first
+    showModal(modal('☁️ إعداد المزامنة السحابية',`
+      <div style="padding:14px;background:rgba(56,139,253,.08);border:1px solid rgba(56,139,253,.2);border-radius:8px;font-size:12px;margin-bottom:16px">
+        <strong>📋 خطوات بسيطة (مرة واحدة فقط):</strong><br><br>
+        1. روح <a href="https://github.com/settings/tokens" target="_blank" style="color:var(--blue)">github.com/settings/tokens</a><br>
+        2. Generate new token (classic)<br>
+        3. اختر <strong>repo</strong> فقط<br>
+        4. انسخ الـ Token والصقه هنا
+      </div>
+      ${fg('GitHub Token *',inp('cfg-token','text',cfg.token||'','ghp_...'))}
+      ${fg('GitHub Username',inp('cfg-user','text',cfg.user||'quadrapharma-cmd','اسم الحساب'))}
+      ${fg('Repository Name',inp('cfg-repo','text',cfg.repo||'pharma-erp-cloud-db','اسم الـ Repo'))}
+      <div class="form-actions">
+        <button class="btn btn-green" onclick="saveCloudConfig()">✅ حفظ وتفعيل</button>
+        <button class="btn btn-ghost" onclick="closeModal()">لاحقاً</button>
+      </div>`));
+    return;
+  }
+  showModal(modal('☁️ المزامنة مع Cloud',`
+    <div style="display:grid;gap:12px">
+
+      <div style="padding:14px;background:rgba(46,160,67,.08);border:1px solid rgba(46,160,67,.2);border-radius:8px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:4px">✅ Cloud Database نشط</div>
+        <div style="font-size:11px;color:var(--muted)">
+          Repository: <code>quadrapharma-cmd/pharma-erp-cloud-db</code> (خاص)<br>
+          آخر مزامنة: <strong>${_lastSyncTime?new Date(_lastSyncTime).toLocaleString('ar-EG'):'—'}</strong>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn btn-green" onclick="manualSync('push')">⬆️ رفع للCloud الآن</button>
+        <button class="btn btn-white" onclick="manualSync('pull')">⬇️ تحميل من Cloud</button>
+      </div>
+
+      <div id="sync-result" style="font-size:12px;min-height:20px;text-align:center"></div>
+
+      <div style="border-top:1px solid var(--border);padding-top:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px">💾 نسخ احتياطية</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-white btn-sm" onclick="exportBackupJSON()">⬇️ تحميل JSON</button>
+          <label class="btn btn-white btn-sm" style="cursor:pointer;margin:0">
+            ⬆️ استيراد JSON
+            <input type="file" accept=".json" style="display:none" onchange="importBackupJSON(this)">
+          </label>
+        </div>
+      </div>
+
+      <div style="font-size:11px;color:var(--muted)">
+        💡 البيانات بتتحفظ تلقائياً على Cloud بعد كل تغيير<br>
+        🔒 الـ Repository خاص — بياناتك آمنة تماماً
+      </div>
+    </div>
+  `));
+}
+
+async function manualSync(direction){
+  const result = document.getElementById('sync-result');
+  if(result) result.innerHTML = '<span style="color:var(--amber)">🔄 جاري...</span>';
+  try {
+    if(direction==='push'){
+      await pushToCloud();
+      if(result) result.innerHTML = '<span style="color:var(--green-light)">✅ تم الرفع بنجاح</span>';
+    } else {
+      const ok = await pullFromCloud();
+      if(ok){
+        if(result) result.innerHTML = '<span style="color:var(--green-light)">✅ تم التحميل — سيتم تحديث الصفحة</span>';
+        setTimeout(()=>{ closeModal(); go(currentPage); }, 1200);
+      }
+    }
+  } catch(e){
+    if(result) result.innerHTML = `<span style="color:var(--red)">❌ ${e.message}</span>`;
+  }
+}
+
+// ── Backup ────────────────────────────────────────────────────
+function exportBackupJSON(){
+  const blob = new Blob([JSON.stringify(DB,null,2)],{type:'application/json'});
+  const a    = Object.assign(document.createElement('a'),{
+    href: URL.createObjectURL(blob),
+    download: `pharma-erp-backup-${new Date().toISOString().slice(0,10)}.json`
+  });
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function importBackupJSON(input){
+  const file = input.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async e => {
+    try {
+      const imported = JSON.parse(e.target.result);
+      if(!imported.products) throw new Error('ملف غير صحيح');
+      if(!confirm('استيراد Backup؟ سيتم استبدال كل البيانات الحالية.')) return;
+      Object.assign(DB, imported);
+      _origSaveDB();
+      await pushToCloud();
+      closeModal();
+      go(currentPage);
+      alert('✅ تم الاستيراد ومزامنة Cloud');
+    } catch(err){ alert('❌ '+err.message); }
+  };
+  reader.readAsText(file);
+}
+
+// ── Auto-init on load ─────────────────────────────────────────
+(async function initCloud(){
+  // Wait for DOM
+  await new Promise(r => {
+    if(document.readyState==='complete') r();
+    else window.addEventListener('load', r);
+  });
+
+  setSyncStatus('syncing');
+  const result = await pullFromCloud();
+
+  if(result==='cloud'){
+    // Cloud had newer data — refresh UI
+    setTimeout(()=>{ if(typeof go==='function') go('dashboard'); }, 500);
+  } else {
+    setSyncStatus(result ? 'synced' : 'error');
+  }
+
+  // Also sync on page visibility change (user switches tabs/apps)
+  document.addEventListener('visibilitychange', ()=>{
+    if(!document.hidden && _cloudEnabled){
+      pullFromCloud().then(r=>{ if(r==='cloud' && typeof go==='function') go(currentPage); });
+    }
+  });
+})();
+
+
+function saveCloudConfig(){
+  const token = val('cfg-token');
+  if(!token) return alert('يرجى إدخال الـ Token');
+  const cfg = {
+    token: token.trim(),
+    user:  val('cfg-user')||'quadrapharma-cmd',
+    repo:  val('cfg-repo')||'pharma-erp-cloud-db'
+  };
+  localStorage.setItem('_pharma_cloud_cfg', JSON.stringify(cfg));
+  // Reinitialize cloud with new config
+  CLOUD_CONFIG.token = cfg.token;
+  CLOUD_CONFIG.user  = cfg.user;
+  CLOUD_CONFIG.repo  = cfg.repo;
+  closeModal();
+  setSyncStatus('syncing');
+  pushToCloud().then(()=>{ setSyncStatus('synced'); alert('✅ تم الاتصال بالـ Cloud!'); });
+}
+
 // renderNav/go called by coEnter() after company is selected
 </script>
 
